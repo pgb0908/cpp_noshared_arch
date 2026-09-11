@@ -1,25 +1,13 @@
 #include "gateway_runtime.hpp"
 
 #include <iostream>
-#include <stdexcept>
 
 GatewayRuntime::GatewayRuntime(Config config) : config_(std::move(config)) {}
 
 void GatewayRuntime::start() {
-    // Blocking resolve at startup only -- not on the hot path.
-    boost::asio::io_context resolve_io_context;
-    boost::asio::ip::tcp::resolver resolver(resolve_io_context);
-    boost::system::error_code ec;
-    auto results = resolver.resolve(config_.upstream_host, std::to_string(config_.upstream_port), ec);
-    if (ec || results.empty()) {
-        throw std::runtime_error("failed to resolve upstream " + config_.upstream_host + ":" +
-                                  std::to_string(config_.upstream_port) + ": " + ec.message());
-    }
-    const boost::asio::ip::tcp::endpoint upstream_endpoint = *results.begin();
-
     shards_.reserve(config_.shard_count);
     for (std::size_t i = 0; i < config_.shard_count; ++i) {
-        shards_.push_back(std::make_unique<GatewayShard>(i, config_, upstream_endpoint));
+        shards_.push_back(std::make_unique<GatewayShard>(i, config_));
     }
     for (std::size_t i = 0; i < shards_.size(); ++i) {
         shards_[i]->start(static_cast<int>(i));
@@ -30,8 +18,7 @@ void GatewayRuntime::start() {
     listener_thread_ = std::thread([this] { listener_io_context_.run(); });
 
     std::cout << "perCoreShard listening on 0.0.0.0:" << config_.listen_port << " -> "
-              << config_.upstream_host << ":" << config_.upstream_port << " with "
-              << shards_.size() << " shard(s)\n";
+              << config_.upstreams.size() << " upstream endpoint(s), " << shards_.size() << " shard(s)\n";
 }
 
 void GatewayRuntime::stop() {

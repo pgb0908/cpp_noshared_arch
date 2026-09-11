@@ -3,3 +3,7 @@ build/
 .idea/
 *.o
 *.out
+*.log
+compile_commands.json
+.vscode/
+.DS_Store

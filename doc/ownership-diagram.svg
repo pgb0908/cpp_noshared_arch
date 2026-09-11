@@ -1,0 +1,130 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 920" font-family="Menlo, Consolas, monospace">
+  <defs>
+    <marker id="arrowOwn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#111827"/>
+    </marker>
+    <marker id="arrowRef" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+    <marker id="arrowShared" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#b45309"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1200" height="920" fill="#ffffff"/>
+
+  <text x="600" y="34" text-anchor="middle" font-size="20" font-weight="bold" fill="#111827">perCoreShard 객체 참조/소유 관계</text>
+
+  <!-- Legend -->
+  <g font-size="13" fill="#111827">
+    <line x1="40" y1="60" x2="80" y2="60" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+    <text x="90" y="64">owns (unique_ptr / 값으로 소유)</text>
+
+    <line x1="330" y1="60" x2="370" y2="60" stroke="#2563eb" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#arrowRef)"/>
+    <text x="380" y="64" fill="#2563eb">reference (&amp;, 소유하지 않음)</text>
+
+    <line x1="670" y1="60" x2="710" y2="60" stroke="#b45309" stroke-width="2" marker-end="url(#arrowShared)"/>
+    <text x="720" y="64" fill="#b45309">owns via shared_ptr (동적 생명주기)</text>
+  </g>
+
+  <!-- Config -->
+  <rect x="40" y="100" width="180" height="56" rx="8" fill="#f3f4f6" stroke="#111827" stroke-width="1.5"/>
+  <text x="130" y="123" text-anchor="middle" font-size="14" font-weight="bold" fill="#111827">Config</text>
+  <text x="130" y="141" text-anchor="middle" font-size="11" fill="#4b5563">listen_port, upstream_host/port,</text>
+  <text x="130" y="153" text-anchor="middle" font-size="11" fill="#4b5563">shard_count, buffer_size</text>
+
+  <!-- GatewayRuntime -->
+  <rect x="480" y="100" width="240" height="70" rx="8" fill="#e0e7ff" stroke="#111827" stroke-width="1.5"/>
+  <text x="600" y="128" text-anchor="middle" font-size="15" font-weight="bold" fill="#111827">GatewayRuntime</text>
+  <text x="600" y="146" text-anchor="middle" font-size="11" fill="#374151">config_ (값 보유)</text>
+  <text x="600" y="160" text-anchor="middle" font-size="11" fill="#374151">shards_, listener_, listener_thread_</text>
+
+  <!-- runtime -> config (value, still "owns" style since held by value) -->
+  <line x1="480" y1="140" x2="220" y2="130" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+
+  <!-- Listener -->
+  <rect x="140" y="250" width="200" height="64" rx="8" fill="#dbeafe" stroke="#111827" stroke-width="1.5"/>
+  <text x="240" y="276" text-anchor="middle" font-size="14" font-weight="bold" fill="#111827">Listener</text>
+  <text x="240" y="294" text-anchor="middle" font-size="11" fill="#374151">acceptor_ (owns), next_shard_</text>
+  <text x="240" y="307" text-anchor="middle" font-size="11" fill="#374151">shards_ (vector&lt;unique_ptr&gt;&amp;)</text>
+
+  <!-- runtime -> listener owns -->
+  <line x1="540" y1="170" x2="280" y2="250" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+
+  <!-- GatewayShard 0 -->
+  <rect x="460" y="250" width="220" height="64" rx="8" fill="#dcfce7" stroke="#111827" stroke-width="1.5"/>
+  <text x="570" y="276" text-anchor="middle" font-size="14" font-weight="bold" fill="#111827">GatewayShard #0</text>
+  <text x="570" y="294" text-anchor="middle" font-size="11" fill="#374151">io_context_, thread_ (owns)</text>
+  <text x="570" y="307" text-anchor="middle" font-size="11" fill="#374151">config_ (const Config&amp;)</text>
+
+  <!-- GatewayShard N (dashed box, repeated) -->
+  <rect x="760" y="250" width="220" height="64" rx="8" fill="#dcfce7" stroke="#111827" stroke-width="1.5" stroke-dasharray="6,4"/>
+  <text x="870" y="276" text-anchor="middle" font-size="14" font-weight="bold" fill="#111827">GatewayShard #N</text>
+  <text x="870" y="294" text-anchor="middle" font-size="11" fill="#374151">(shard_count개, 서로 독립)</text>
+  <text x="870" y="307" text-anchor="middle" font-size="11" fill="#374151">동일 구조 반복</text>
+
+  <!-- runtime -> shard0 owns -->
+  <line x1="600" y1="170" x2="570" y2="250" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+  <!-- runtime -> shardN owns -->
+  <line x1="660" y1="170" x2="870" y2="250" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+
+  <!-- shard config reference -->
+  <line x1="460" y1="270" x2="220" y2="150" stroke="#2563eb" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#arrowRef)"/>
+
+  <!-- listener -> shard0 reference (round-robin dispatch target) -->
+  <line x1="340" y1="282" x2="460" y2="282" stroke="#2563eb" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#arrowRef)"/>
+  <text x="400" y="272" text-anchor="middle" font-size="10" fill="#2563eb">asio::post</text>
+
+  <!-- BufferPool -->
+  <rect x="380" y="400" width="170" height="56" rx="8" fill="#fef9c3" stroke="#111827" stroke-width="1.5"/>
+  <text x="465" y="423" text-anchor="middle" font-size="13" font-weight="bold" fill="#111827">BufferPool</text>
+  <text x="465" y="441" text-anchor="middle" font-size="11" fill="#374151">buffer_size_</text>
+
+  <!-- LocalMetrics -->
+  <rect x="590" y="400" width="170" height="56" rx="8" fill="#fee2e2" stroke="#111827" stroke-width="1.5"/>
+  <text x="675" y="423" text-anchor="middle" font-size="13" font-weight="bold" fill="#111827">LocalMetrics</text>
+  <text x="675" y="441" text-anchor="middle" font-size="11" fill="#374151">alignas(64), 카운터들</text>
+
+  <!-- shard -> bufferpool / metrics owns (value members) -->
+  <line x1="540" y1="314" x2="465" y2="400" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+  <line x1="600" y1="314" x2="675" y2="400" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+
+  <!-- Session -->
+  <rect x="460" y="530" width="240" height="70" rx="8" fill="#ffedd5" stroke="#111827" stroke-width="1.5"/>
+  <text x="580" y="556" text-anchor="middle" font-size="14" font-weight="bold" fill="#111827">Session</text>
+  <text x="580" y="574" text-anchor="middle" font-size="11" fill="#374151">enable_shared_from_this, shard당 N개</text>
+  <text x="580" y="588" text-anchor="middle" font-size="11" fill="#374151">downstream_/upstream_ 소켓 (owns)</text>
+
+  <!-- shard -> session via dispatch_accept, shared_ptr owner is the pending async ops chain -->
+  <line x1="570" y1="314" x2="560" y2="530" stroke="#b45309" stroke-width="2" marker-end="url(#arrowShared)"/>
+  <text x="800" y="480" font-size="10" fill="#b45309">dispatch_accept() → make_shared&lt;Session&gt;</text>
+
+  <!-- session -> bufferpool / metrics reference -->
+  <line x1="500" y1="530" x2="470" y2="456" stroke="#2563eb" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#arrowRef)"/>
+  <line x1="640" y1="530" x2="670" y2="456" stroke="#2563eb" stroke-width="2" stroke-dasharray="5,4" marker-end="url(#arrowRef)"/>
+
+  <!-- downstream / upstream sockets, buffers -->
+  <rect x="300" y="680" width="170" height="50" rx="8" fill="#f3f4f6" stroke="#111827" stroke-width="1.5"/>
+  <text x="385" y="710" text-anchor="middle" font-size="12" fill="#111827">downstream_ socket</text>
+
+  <rect x="700" y="680" width="170" height="50" rx="8" fill="#f3f4f6" stroke="#111827" stroke-width="1.5"/>
+  <text x="785" y="710" text-anchor="middle" font-size="12" fill="#111827">upstream_ socket</text>
+
+  <rect x="460" y="680" width="240" height="70" rx="8" fill="#f3f4f6" stroke="#111827" stroke-width="1.5"/>
+  <text x="580" y="704" text-anchor="middle" font-size="12" fill="#111827">down_to_up_buf_ / up_to_down_buf_</text>
+  <text x="580" y="720" text-anchor="middle" font-size="11" fill="#4b5563">unique_ptr&lt;vector&lt;char&gt;&gt; (owns)</text>
+  <text x="580" y="736" text-anchor="middle" font-size="11" fill="#4b5563">BufferPool::acquire()로 생성</text>
+
+  <line x1="500" y1="600" x2="400" y2="680" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+  <line x1="640" y1="600" x2="780" y2="680" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+  <line x1="580" y1="600" x2="580" y2="680" stroke="#111827" stroke-width="2" marker-end="url(#arrowOwn)"/>
+
+  <!-- upstream_endpoint copies note -->
+  <text x="1000" y="355" font-size="11" fill="#4b5563" text-anchor="middle">upstream_endpoint_는</text>
+  <text x="1000" y="370" font-size="11" fill="#4b5563" text-anchor="middle">GatewayRuntime이 1회 resolve 후</text>
+  <text x="1000" y="385" font-size="11" fill="#4b5563" text-anchor="middle">각 Shard/Session에 값으로 복사</text>
+  <text x="1000" y="400" font-size="11" fill="#4b5563" text-anchor="middle">(참조 아님, mutable 공유 없음)</text>
+
+  <text x="150" y="800" font-size="12" fill="#6b7280">Cross-thread 경계: GatewayRuntime(main thread) ↔ Listener(전용 thread) ↔ 각 GatewayShard(pinned thread) — 화살표로 그려진 reference는</text>
+  <text x="150" y="818" font-size="12" fill="#6b7280">전부 "같은 스레드 안에서만" 안전하게 역참조되며, shard 경계를 넘는 통신은 asio::post 한 곳(Listener→Shard)뿐입니다.</text>
+</svg>
