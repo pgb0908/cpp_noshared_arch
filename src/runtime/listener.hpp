@@ -5,7 +5,7 @@
 #include <memory>
 #include <vector>
 
-#include "gateway_shard.hpp"
+#include "runtime/gateway_shard.hpp"
 
 // A single acceptor running on its own dedicated thread/io_context, kept
 // separate from every shard so accept load never competes with a shard's

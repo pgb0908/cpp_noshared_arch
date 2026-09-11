@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-#include "config.hpp"
+#include "config/config.hpp"
 
 // Shard-local: owned by exactly one GatewayShard, every method runs on that
 // shard's io_context thread only. Each shard resolves and pools upstream

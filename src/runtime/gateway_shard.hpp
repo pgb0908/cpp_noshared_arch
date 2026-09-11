@@ -3,10 +3,10 @@
 #include <boost/asio.hpp>
 #include <thread>
 
-#include "buffer_pool.hpp"
-#include "config.hpp"
-#include "local_metrics.hpp"
-#include "upstream_manager.hpp"
+#include "config/config.hpp"
+#include "upstream/upstream_manager.hpp"
+#include "util/buffer_pool.hpp"
+#include "util/local_metrics.hpp"
 
 // 1 CPU Core = 1 Thread = 1 io_context = 1 GatewayShard.
 // Every Connection accepted onto this shard is owned by it for its whole

@@ -1,5 +1,5 @@
-#include "config.hpp"
-#include "gateway_runtime.hpp"
+#include "config/config.hpp"
+#include "runtime/gateway_runtime.hpp"
 
 int main(int argc, char** argv) {
     Config config = Config::from_args(argc, argv);

@@ -1,7 +1,7 @@
-#include "gateway_shard.hpp"
+#include "runtime/gateway_shard.hpp"
 
-#include "cpu_affinity.hpp"
-#include "session.hpp"
+#include "session/session.hpp"
+#include "util/cpu_affinity.hpp"
 
 GatewayShard::GatewayShard(std::size_t index, const Config& config)
     : index_(index),

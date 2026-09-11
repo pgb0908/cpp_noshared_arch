@@ -4,9 +4,9 @@
 #include <memory>
 #include <vector>
 
-#include "buffer_pool.hpp"
-#include "local_metrics.hpp"
-#include "upstream_manager.hpp"
+#include "upstream/upstream_manager.hpp"
+#include "util/buffer_pool.hpp"
+#include "util/local_metrics.hpp"
 
 // A Connection: owned by exactly one shard for its whole lifetime. All I/O
 // for this session runs on that shard's io_context thread only -- no

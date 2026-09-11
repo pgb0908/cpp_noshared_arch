@@ -14,9 +14,9 @@ find_package(nlohmann_json REQUIRED)
 
 add_executable(perCoreShard
     main.cpp
-    src/gateway_shard.cpp
-    src/gateway_runtime.cpp
-    src/upstream_manager.cpp
+    src/runtime/gateway_shard.cpp
+    src/runtime/gateway_runtime.cpp
+    src/upstream/upstream_manager.cpp
 )
 
 target_include_directories(perCoreShard PRIVATE src)
