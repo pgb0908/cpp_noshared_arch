@@ -1,11 +1,11 @@
 #pragma once
 
-#include <boost/asio.hpp>
 #include <memory>
 #include <thread>
 #include <vector>
 
 #include "config/config.hpp"
+#include "net/event_loop.hpp"
 #include "runtime/gateway_shard.hpp"
 #include "runtime/listener.hpp"
 
@@ -27,7 +27,7 @@ private:
     Config config_;
     std::vector<std::unique_ptr<GatewayShard>> shards_;
 
-    boost::asio::io_context listener_io_context_;
+    std::unique_ptr<net::IEventLoop> listener_event_loop_;
     std::unique_ptr<Listener> listener_;
     std::thread listener_thread_;
 

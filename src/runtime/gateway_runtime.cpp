@@ -1,6 +1,16 @@
 #include "runtime/gateway_runtime.hpp"
 
+// NOTE: this is the one deliberate exception to this codebase's
+// Boost-decoupling. SIGINT/SIGTERM handling is one-shot, control-plane-only
+// process lifecycle glue -- not part of the request hot path -- and every
+// realistic replacement for Boost.Asio still needs OS signal handling
+// somehow, so abstracting it wouldn't buy real swappability. See
+// doc/plan.md for the full note.
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/signal_set.hpp>
 #include <iostream>
+
+#include "net/boost/factory.hpp"
 
 GatewayRuntime::GatewayRuntime(Config config) : config_(std::move(config)) {}
 
@@ -13,9 +23,10 @@ void GatewayRuntime::start() {
         shards_[i]->start(static_cast<int>(i));
     }
 
-    listener_ = std::make_unique<Listener>(listener_io_context_, config_.listen_port, shards_);
+    listener_event_loop_ = net::boost_asio::create_event_loop();
+    listener_ = std::make_unique<Listener>(*listener_event_loop_, config_.listen_port, shards_);
     listener_->start();
-    listener_thread_ = std::thread([this] { listener_io_context_.run(); });
+    listener_thread_ = std::thread([this] { listener_event_loop_->run(); });
 
     std::cout << "perCoreShard listening on 0.0.0.0:" << config_.listen_port << " -> "
               << config_.upstreams.size() << " upstream endpoint(s), " << shards_.size() << " shard(s)\n";
@@ -28,7 +39,7 @@ void GatewayRuntime::stop() {
     stopped_ = true;
 
     listener_->stop();
-    listener_io_context_.stop();
+    listener_event_loop_->stop();
     if (listener_thread_.joinable()) {
         listener_thread_.join();
     }

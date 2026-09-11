@@ -40,6 +40,35 @@ MVP 범위: 순수 TCP byte relay, 단일 고정 upstream, HTTP 파싱 없음. g
 
 ---
 
+## 인프라 리팩토링 — net/ 추상화 계층 + Cross-Thread Accept 버그 수정 ✅
+
+Phase 4 진행 전에 두 가지 구조적 작업을 먼저 했다.
+
+### 1. Boost.Asio 결합도 낮추기
+
+`src/net/`에 라이브러리 독립적인 인터페이스(`ISocket`, `IAcceptor`, `IResolver`, `ITimer`, `IEventLoop`)를 두고, `src/net/boost/`에만 Boost.Asio 구현체(`BoostSocket`, `BoostAcceptor`, `BoostResolver`, `BoostTimer`, `BoostEventLoop`)를 둠. `Session`/`UpstreamManager`/`Listener`/`GatewayShard.hpp`는 이제 `<boost/asio.hpp>`를 전혀 include하지 않고 `net/` 인터페이스만 참조한다. 유일한 예외는 `GatewayRuntime::run_until_signal()`의 SIGINT/SIGTERM 처리 — 1회성 control-plane 코드라 추상화 실익이 없어 의도적으로 Boost 직접 사용 유지 (주석으로 명시).
+
+`GatewayShard.cpp`/`GatewayRuntime.cpp`만 `net/boost/factory.hpp`(`create_event_loop()`)를 통해 구체 구현체를 생성 — 이 두 곳이 유일한 "composition root".
+
+### 2. 발견한 버그: Session의 I/O가 실제로는 Listener 스레드에서 실행되고 있었음
+
+Boost.Asio에서 `acceptor.async_accept(handler)`로 받은 소켓은 **acceptor 자신의 io_context(=Listener의 io_context)에 바인딩된 채로 생성**된다. `asio::post`로 shard에 넘겨도 이 바인딩은 안 바뀌어서, `dispatch_accept()` 자체(Session 생성)는 shard 스레드에서 실행되지만 **Session의 실제 `async_read_some`/`async_write` 완료 콜백은 전부 Listener 스레드에서 실행**되고 있었다. Phase 2부터 지금까지 "connection의 I/O가 shard 스레드에서 처리된다"는 핵심 전제가 깨져 있었던 것 — thread-id 비교로 직접 확인함.
+
+**수정**: `IEventLoop::adopt_socket()` 추가 — accept된 소켓의 native handle(fd)을 release해서 대상 shard의 event loop에 새로 바인딩된 소켓으로 재구성. `Listener::do_accept()`가 shard에 post한 뒤 `target_loop.adopt_socket(...)`을 호출하고 나서야 `dispatch_accept()`를 호출하도록 수정 (`src/runtime/listener.hpp`).
+
+### 3. 회귀 방지: assert 기반 스레드 검증
+
+`IEventLoop::is_current_thread()`를 추가해 "지금 이 스레드가 이 event loop를 실행 중인 스레드인가"를 확인할 수 있게 하고, 다음 지점에 `assert()`로 박아넣음:
+- `GatewayShard::dispatch_accept()` — 호출 지점 자체 검증
+- `UpstreamManager::select_endpoint/acquire_connection/release_connection` — shard-local 상태 접근 지점 검증
+- **`Session`의 모든 I/O 콜백** (`connect_upstream`, `relay_downstream_to_upstream`, `relay_upstream_to_downstream`의 read/write 콜백) — 실제 버그가 드러나는 지점, `assert_on_owning_thread()` 헬퍼로 일괄 적용
+
+실제로 `adopt_socket()`을 빼고 빌드해서 `Session::assert_on_owning_thread()`가 정확히 터지는 것까지 확인함. `CMakeLists.txt`의 기본 `CMAKE_BUILD_TYPE`을 `Debug`로 바꿔서 (기존 `RelWithDebInfo`는 `NDEBUG`를 정의해 assert를 무력화하므로) 기본 빌드에서 이 검증이 항상 활성화되도록 함.
+
+**의사결정 필요**: 이 assert들을 나중에 Release 빌드에서도 살려둘지(런타임 비용은 거의 0 — 비교 1번), 아니면 Phase 6 프로파일링 이후 안정성이 확인되면 NDEBUG로 끌지.
+
+---
+
 ## Phase 4 — Timer / Buffer / Metrics 완전 Local화 (다음 단계 후보)
 
 ### TimerManager (신규, shard-local)
