@@ -1,11 +1,11 @@
 #include "runtime/gateway_runtime.hpp"
 
-// NOTE: this is the one deliberate exception to this codebase's
-// Boost-decoupling. SIGINT/SIGTERM handling is one-shot, control-plane-only
-// process lifecycle glue -- not part of the request hot path -- and every
-// realistic replacement for Boost.Asio still needs OS signal handling
-// somehow, so abstracting it wouldn't buy real swappability. See
-// doc/plan.md for the full note.
+// 참고: 이 코드는 이 프로젝트의 Boost 디커플링에서 의도적으로 둔 유일한
+// 예외다. SIGINT/SIGTERM 처리는 1회성, control-plane 전용 프로세스
+// 생명주기 처리일 뿐 -- request hot path와 무관 -- 이고, Boost.Asio를
+// 대체할 어떤 현실적인 라이브러리를 쓰더라도 OS signal 처리는 어차피
+// 따로 필요하므로 추상화해봐야 실질적인 교체 가능성을 얻지 못한다.
+// 전체 설명은 doc/plan.md 참고.
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/signal_set.hpp>
 #include <iostream>

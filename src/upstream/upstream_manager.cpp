@@ -13,9 +13,9 @@ UpstreamManager::UpstreamManager(net::IEventLoop& event_loop, const Config& conf
 }
 
 void UpstreamManager::start() {
-    // Created here (not in the constructor) because GatewayShard builds
-    // UpstreamManager before its event loop's thread starts running --
-    // resolver_/dns_refresh_timer_ are only ever touched from that thread.
+    // 생성자가 아니라 여기서 만드는 이유: GatewayShard는 event loop
+    // 스레드가 실제로 돌기 시작하기 전에 UpstreamManager를 만들고 --
+    // resolver_/dns_refresh_timer_는 오직 그 스레드에서만 건드려야 함.
     resolver_ = event_loop_.create_resolver();
     dns_refresh_timer_ = event_loop_.create_timer();
     resolve_all();
@@ -23,8 +23,8 @@ void UpstreamManager::start() {
 }
 
 void UpstreamManager::resolve_all() {
-    // Synchronous resolve is fine here: this runs once at shard startup and
-    // then only once per dns_refresh_interval_seconds -- not the hot path.
+    // 여기선 동기 resolve로 충분함: shard 시작 시 1회, 이후로는
+    // dns_refresh_interval_seconds마다 1회뿐 -- hot path 아님.
     for (auto& ep : endpoints_) {
         auto [err, results] = resolver_->resolve(ep.host, ep.port);
         if (!err.ok() || results.empty()) {
@@ -40,7 +40,7 @@ void UpstreamManager::schedule_refresh() {
     dns_refresh_timer_->expires_after(std::chrono::seconds(config_.dns_refresh_interval_seconds));
     dns_refresh_timer_->async_wait([this](const net::Error& err) {
         if (!err.ok()) {
-            return;  // timer cancelled -- shard is shutting down
+            return;  // timer가 취소됨 -- shard 종료 중
         }
         resolve_all();
         schedule_refresh();
@@ -68,10 +68,10 @@ void UpstreamManager::acquire_connection(std::size_t index, net::SocketCallback 
     auto socket = event_loop_.create_socket();
     net::ISocket* raw = socket.get();
     const net::Endpoint target = endpoints_[index].resolved;
-    // net::ErrorCallback is a std::function, which requires a
-    // copy-constructible target -- a unique_ptr capture alone isn't
-    // copyable, even though this callback only ever runs once, so it's
-    // boxed in a shared_ptr first (same pattern as Listener::do_accept()).
+    // net::ErrorCallback은 std::function이라 복사 생성 가능한 대상을
+    // 요구한다 -- 이 콜백은 어차피 한 번만 실행되지만 unique_ptr을
+    // 그대로 캡처하면 복사가 안 되므로, shared_ptr로 먼저 감싼다
+    // (Listener::do_accept()와 동일한 패턴).
     auto boxed_socket = std::make_shared<std::unique_ptr<net::ISocket>>(std::move(socket));
     raw->async_connect(target, [boxed_socket, callback = std::move(callback)](const net::Error& err) {
         if (!err.ok()) {

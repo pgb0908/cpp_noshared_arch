@@ -4,9 +4,9 @@
 
 #include "net/types.hpp"
 
-// The only files in this project allowed to include <boost/asio.hpp> (or
-// any boost::asio/boost::system header) directly are the ones under
-// net/boost/ -- everything else depends only on the net/ interfaces.
+// 이 프로젝트에서 <boost/asio.hpp>(혹은 boost::asio/boost::system 헤더)를
+// 직접 include해도 되는 파일은 net/boost/ 아래뿐이다 -- 그 외 모든 곳은
+// net/ 인터페이스에만 의존한다.
 namespace net::boost_asio {
 
 inline Error to_net_error(const boost::system::error_code& ec) {

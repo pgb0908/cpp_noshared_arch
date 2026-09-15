@@ -13,9 +13,9 @@ class IResolver {
 public:
     virtual ~IResolver() = default;
 
-    // Synchronous by design: current usage is a blocking resolve at shard
-    // startup and on a periodic refresh timer -- never on the request hot
-    // path -- so there is no need for an async_resolve() in this interface.
+    // 의도적으로 동기 방식: 현재 사용처는 shard 시작 시 1회 blocking
+    // resolve와 주기적 refresh timer뿐 -- request hot path에서는 절대
+    // 쓰이지 않으므로 이 인터페이스에 async_resolve()는 필요 없다.
     virtual std::pair<Error, std::vector<Endpoint>> resolve(const std::string& host, uint16_t port) = 0;
 };
 

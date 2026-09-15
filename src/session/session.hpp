@@ -10,9 +10,9 @@
 #include "util/buffer_pool.hpp"
 #include "util/local_metrics.hpp"
 
-// A Connection: owned by exactly one shard for its whole lifetime. All I/O
-// for this session runs on that shard's event loop thread only -- no
-// cross-shard access, no locking.
+// Connection 하나: 생명주기 전체를 정확히 하나의 shard가 소유한다.
+// 이 session의 모든 I/O는 그 shard의 event loop 스레드에서만 실행된다
+// -- shard 간 접근 없음, 락 없음.
 class Session : public std::enable_shared_from_this<Session> {
 public:
     Session(std::unique_ptr<net::ISocket> downstream_socket,
@@ -32,14 +32,14 @@ public:
     }
 
 private:
-    // Verifies this callback is actually running on the shard thread that
-    // owns this Session. Added after a real bug was found here: a socket
-    // accepted via Listener stayed bound to the Listener's event loop, so
-    // every Session I/O callback silently ran on the Listener thread
-    // instead of the owning shard's -- see net/event_loop.hpp's
-    // adopt_socket() doc comment. This assert is the regression guard for
-    // exactly that class of bug; only active in debug builds (see
-    // CMakeLists.txt's default build type note).
+    // 이 콜백이 실제로 이 Session을 소유한 shard 스레드에서 실행되고
+    // 있는지 검증한다. 여기서 실제 버그가 발견된 뒤 추가함: Listener가
+    // accept한 소켓이 Listener의 event loop에 그대로 바인딩된 채로
+    // 남아있어서, 모든 Session I/O 콜백이 소유 shard가 아니라 조용히
+    // Listener 스레드에서 실행되고 있었음 -- 자세한 건
+    // net/event_loop.hpp의 adopt_socket() 주석 참고. 이 assert는
+    // 정확히 그 종류의 버그에 대한 회귀 방지 장치이며, 디버그 빌드에서만
+    // 활성화된다 (CMakeLists.txt의 기본 빌드 타입 설명 참고).
     void assert_on_owning_thread() const {
         assert(event_loop_.is_current_thread() && "Session I/O callback running on a non-owning thread");
     }
@@ -75,8 +75,8 @@ private:
             [this, self](const net::Error& err, std::size_t n) {
                 assert_on_owning_thread();
                 if (!err.ok()) {
-                    // Downstream side failed -- upstream connection may
-                    // still be healthy, so don't mark it unhealthy here.
+                    // downstream 쪽 실패 -- upstream 연결은 여전히
+                    // 정상일 수 있으므로 여기서 unhealthy로 표시하지 않음.
                     close();
                     return;
                 }
@@ -111,7 +111,7 @@ private:
                     [this, self](const net::Error& write_err, std::size_t written) {
                         assert_on_owning_thread();
                         if (!write_err.ok()) {
-                            // Downstream side failed -- upstream is still fine.
+                            // downstream 쪽 실패 -- upstream은 여전히 정상.
                             close();
                             return;
                         }
@@ -122,8 +122,8 @@ private:
     }
 
     void close() {
-        // Both relay directions run on the same shard thread, so this is
-        // never called concurrently -- a plain bool guard is sufficient.
+        // 두 relay 방향 다 같은 shard 스레드에서 실행되므로, 이 함수가
+        // 동시에 호출될 일은 없다 -- 평범한 bool guard로 충분.
         if (closing_) {
             return;
         }
@@ -134,20 +134,20 @@ private:
 
         if (upstream_) {
             if (upstream_healthy_ && upstream_->is_open()) {
-                // relay_upstream_to_downstream() always keeps one
-                // async_read_some pending on upstream_ while relaying, to
-                // detect the next chunk (or peer close). That read is still
-                // outstanding at this point -- cancel it before handing the
-                // socket to the pool, otherwise a reused connection would
-                // end up with two pending reads (this stale one + the next
-                // Session's), and either one can steal the other's data.
-                // cancel() completes the stale read with an error, which
-                // close()'s early-return guard (closing_) then makes a
-                // harmless no-op for this already-closing Session.
+                // relay_upstream_to_downstream()은 relay 도중 항상
+                // upstream_에 async_read_some을 하나 걸어둔 채로 다음
+                // chunk(혹은 peer close)를 기다린다. 이 시점에도 그 read는
+                // 여전히 pending 상태 -- 소켓을 풀에 넘기기 전에 취소하지
+                // 않으면, 재사용된 소켓에 (이 낡은 것 + 다음 Session의)
+                // read가 두 개 동시에 걸려서 둘 중 하나가 서로의 데이터를
+                // 가로챌 수 있다. cancel()이 낡은 read를 에러로
+                // 완료시키는데, close()의 조기 반환 guard(closing_) 덕분에
+                // 이미 닫히는 중인 이 Session에서는 그냥 아무 일도 안
+                // 일어난다.
                 upstream_->cancel();
 
-                // Return the still-good upstream connection to the shard's
-                // pool instead of tearing it down -- see UpstreamManager.
+                // 아직 멀쩡한 upstream 연결은 그냥 닫지 않고 shard의
+                // 풀에 반납한다 -- UpstreamManager 참고.
                 upstream_manager_.release_connection(endpoint_index_, std::move(upstream_));
             } else {
                 upstream_->shutdown();

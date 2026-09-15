@@ -29,12 +29,12 @@ void GatewayShard::stop() {
 }
 
 void GatewayShard::dispatch_accept(std::unique_ptr<net::ISocket> socket) {
-    // This is the exact spot where the cross-thread accept handoff bug
-    // used to bite: the socket must already be rebound to THIS shard's
-    // event loop (by Listener, via adopt_socket()) before it ever gets
-    // here. If it isn't, every Session callback for this connection would
-    // silently run on the Listener thread instead of this shard's thread --
-    // see net/event_loop.hpp's adopt_socket() doc comment for the full story.
+    // 바로 여기가 예전에 cross-thread accept handoff 버그가 터지던
+    // 지점이다: 이 소켓은 여기 도달하기 전에 반드시 이 shard의 event
+    // loop에 (Listener가 adopt_socket()으로) 재바인딩돼 있어야 한다.
+    // 그렇지 않으면 이 connection의 모든 Session 콜백이 이 shard가
+    // 아니라 조용히 Listener 스레드에서 실행되어 버린다 -- 전체 경위는
+    // net/event_loop.hpp의 adopt_socket() 주석 참고.
     assert(event_loop_->is_current_thread() && "dispatch_accept() called from a non-owning thread");
 
     auto session =

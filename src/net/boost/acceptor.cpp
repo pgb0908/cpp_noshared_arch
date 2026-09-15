@@ -21,11 +21,11 @@ void BoostAcceptor::async_accept(net::AcceptCallback cb) {
             cb(to_net_error(ec), nullptr);
             return;
         }
-        // NOTE: this socket is bound to io_context_ (this acceptor's loop),
-        // not necessarily the loop of whatever shard ends up owning the
-        // connection. Callers that hand it off across loops must rebind it
-        // via IEventLoop::adopt_socket() before using it -- see
-        // net/event_loop.hpp and Listener::do_accept().
+        // 주의: 이 소켓은 io_context_(이 acceptor의 loop)에 바인딩돼
+        // 있고, 이 connection을 최종적으로 소유하게 될 shard의 loop와는
+        // 별개다. loop 경계를 넘어 이 소켓을 넘기는 쪽에서는 사용하기
+        // 전에 반드시 IEventLoop::adopt_socket()으로 재바인딩해야 한다
+        // -- net/event_loop.hpp와 Listener::do_accept() 참고.
         cb(net::Error::none(), std::make_unique<BoostSocket>(io_context_, std::move(peer)));
     });
 }

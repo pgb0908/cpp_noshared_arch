@@ -12,20 +12,20 @@ public:
 
     virtual void async_connect(const Endpoint& endpoint, ErrorCallback cb) = 0;
     virtual void async_read_some(MutableBuffer buffer, IoCallback cb) = 0;
-    // Writes the entire buffer (matches boost::asio::async_write semantics,
-    // not a raw single async_write_some).
+    // 버퍼 전체를 다 쓴다 (boost::asio::async_write와 동일한 의미,
+    // 단발성 async_write_some이 아님).
     virtual void async_write(ConstBuffer buffer, IoCallback cb) = 0;
 
-    virtual void shutdown() = 0;  // both directions
+    virtual void shutdown() = 0;  // 양방향 모두
     virtual void close() = 0;
     virtual bool is_open() const = 0;
-    virtual void cancel() = 0;    // cancel any pending async operation
+    virtual void cancel() = 0;    // pending 중인 async 작업 취소
 
-    // Releases and returns the platform-native socket handle (POSIX fd),
-    // relinquishing this object's ownership of it. Used only by
-    // IEventLoop::adopt_socket() to move a socket accepted on one event
-    // loop onto another -- see net/event_loop.hpp. Calling any other method
-    // on this object afterward is undefined behavior.
+    // 플랫폼 native 소켓 handle(POSIX fd)을 release해서 반환하고, 이
+    // 객체의 소유권을 포기한다. IEventLoop::adopt_socket()이 한 event
+    // loop에서 accept된 소켓을 다른 loop로 옮길 때만 사용 -- 자세한 건
+    // net/event_loop.hpp 참고. 이후 이 객체의 다른 메서드를 호출하면
+    // undefined behavior.
     virtual int release_native_handle() = 0;
 };
 

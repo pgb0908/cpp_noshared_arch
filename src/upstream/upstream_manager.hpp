@@ -11,32 +11,32 @@
 #include "net/socket.hpp"
 #include "net/timer.hpp"
 
-// Shard-local: owned by exactly one GatewayShard, every method runs on that
-// shard's event loop thread only. Each shard resolves and pools upstream
-// connections independently -- no cross-shard sharing (shared-nothing per
+// Shard-local: 정확히 하나의 GatewayShard가 소유하며, 모든 메서드는 그
+// shard의 event loop 스레드에서만 실행된다. 각 shard는 upstream 연결을
+// 독립적으로 resolve하고 풀링한다 -- shard 간 공유 없음 (shared-nothing,
 // doc/per-core-sharded-architecture.md section 10).
 class UpstreamManager {
 public:
     UpstreamManager(net::IEventLoop& event_loop, const Config& config);
 
-    // Blocking initial DNS resolve for every configured endpoint, then
-    // schedules the periodic refresh timer. Call once, before event_loop.run().
+    // 설정된 모든 endpoint에 대해 blocking DNS resolve를 1회 수행한 뒤,
+    // 주기적 refresh timer를 예약한다. event_loop.run() 전에 한 번만 호출.
     void start();
 
-    // Shard-local round-robin endpoint selection -- plain std::size_t, no
-    // atomic, since only this shard's thread ever calls it (doc section 17).
+    // Shard-local round-robin endpoint 선택 -- 이 shard의 스레드만
+    // 호출하므로 평범한 std::size_t, atomic 불필요 (문서 section 17).
     std::size_t select_endpoint();
 
-    // Delivers a connected socket for this endpoint via callback: either a
-    // pooled idle connection (callback invoked synchronously, before this
-    // call returns) or a freshly connected one (invoked once connect
-    // completes). Callers must treat both paths identically. On failure,
-    // the socket pointer passed to the callback is null.
+    // 이 endpoint에 대해 연결된 소켓을 콜백으로 전달한다: 풀에 있던
+    // idle connection이면(이 호출이 반환되기 전에 콜백이 동기적으로
+    // 실행됨) 그걸 쓰고, 아니면 새로 connect한 뒤(connect 완료 시점에
+    // 비동기로 콜백 실행) 그걸 쓴다. 호출부는 두 경로를 동일하게
+    // 처리해야 한다. 실패 시 콜백에 전달되는 소켓 포인터는 null.
     void acquire_connection(std::size_t index, net::SocketCallback callback);
 
-    // Returns a still-healthy socket to the idle pool (bounded by
-    // connection_pool_max_idle_per_endpoint); if the pool for this endpoint
-    // is already full, the socket is simply closed and dropped.
+    // 아직 정상인 소켓을 idle pool에 반납한다 (상한:
+    // connection_pool_max_idle_per_endpoint). 이 endpoint의 풀이 이미
+    // 가득 찼으면 그냥 소켓을 닫고 버린다.
     void release_connection(std::size_t index, std::unique_ptr<net::ISocket> socket);
 
 private:

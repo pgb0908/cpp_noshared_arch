@@ -9,8 +9,8 @@
 #include "runtime/gateway_shard.hpp"
 #include "runtime/listener.hpp"
 
-// Owns the shard pool and the single accept listener. Each GatewayShard
-// resolves and manages its own upstreams independently (see UpstreamManager).
+// shard 풀과 단일 accept listener를 소유한다. 각 GatewayShard는 자신의
+// upstream을 독립적으로 resolve하고 관리한다 (UpstreamManager 참고).
 class GatewayRuntime {
 public:
     explicit GatewayRuntime(Config config);
@@ -18,7 +18,7 @@ public:
     void start();
     void stop();
 
-    // Blocks the calling thread until SIGINT/SIGTERM, then calls stop().
+    // SIGINT/SIGTERM이 올 때까지 호출한 스레드를 blocking한 뒤 stop() 호출.
     void run_until_signal();
 
     void print_metrics_summary() const;

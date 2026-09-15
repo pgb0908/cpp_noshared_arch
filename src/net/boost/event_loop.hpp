@@ -27,9 +27,10 @@ private:
     ::boost::asio::io_context io_context_;
     ::boost::asio::executor_work_guard<::boost::asio::io_context::executor_type> work_guard_;
 
-    // Recorded on entry to run() so is_current_thread() can be checked from
-    // any thread. std::thread::id has no "unset" sentinel that's safe to
-    // compare before run() has ever executed, so we gate on has_run_.
+    // run() 진입 시점에 기록해서 is_current_thread()를 어떤 스레드에서든
+    // 확인할 수 있게 함. std::thread::id에는 run()이 한 번도 실행 안
+    // 됐을 때 안전하게 비교할 "미설정" sentinel 값이 없어서, has_run_로
+    // 게이팅한다.
     std::atomic<bool> has_run_{false};
     std::thread::id owner_thread_id_{};
 };
