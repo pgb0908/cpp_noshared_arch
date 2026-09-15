@@ -20,7 +20,7 @@ void BoostEventLoop::stop() {
     io_context_.stop();
 }
 
-void BoostEventLoop::post(std::function<void()> task) { ::boost::asio::post(io_context_, std::move(task)); }
+void BoostEventLoop::post(net::VoidCallback task) { ::boost::asio::post(io_context_, std::move(task)); }
 
 bool BoostEventLoop::is_current_thread() const noexcept {
     return has_run_.load(std::memory_order_acquire) && std::this_thread::get_id() == owner_thread_id_;

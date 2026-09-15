@@ -29,6 +29,6 @@ public:
     virtual int release_native_handle() = 0;
 };
 
-using SocketCallback = std::function<void(const Error&, std::unique_ptr<ISocket>)>;
+using SocketCallback = MoveOnlyFunction<void(const Error&, std::unique_ptr<ISocket>)>;
 
 }  // namespace net

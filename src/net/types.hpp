@@ -2,8 +2,9 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <functional>
 #include <string>
+
+#include "util/move_only_function.hpp"
 
 // 라이브러리에 독립적인 네트워킹 타입들. 이 네임스페이스 안의 어떤 것도
 // Boost(혹은 다른 특정 비동기 I/O 라이브러리)에 의존해서는 안 된다 --
@@ -36,8 +37,11 @@ struct ConstBuffer {
     std::size_t size = 0;
 };
 
-using VoidCallback = std::function<void()>;
-using ErrorCallback = std::function<void(const Error&)>;
-using IoCallback = std::function<void(const Error&, std::size_t)>;
+// std::function이 아니라 MoveOnlyFunction을 쓰는 이유는
+// util/move_only_function.hpp 주석 참고 -- unique_ptr 캡처를 boxing
+// 없이 그대로 담기 위함.
+using VoidCallback = MoveOnlyFunction<void()>;
+using ErrorCallback = MoveOnlyFunction<void(const Error&)>;
+using IoCallback = MoveOnlyFunction<void(const Error&, std::size_t)>;
 
 }  // namespace net

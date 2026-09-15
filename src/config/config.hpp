@@ -20,6 +20,9 @@ struct Config {
     std::vector<UpstreamEndpointConfig> upstreams;
     unsigned dns_refresh_interval_seconds = 30;
     std::size_t connection_pool_max_idle_per_endpoint = 8;
+    unsigned connect_timeout_seconds = 5;             // upstream connect 타임아웃
+    std::size_t buffer_pool_max_free = 256;            // shard-local BufferPool free-list 상한
+    unsigned metrics_report_interval_seconds = 10;      // 0이면 주기적 리포트 비활성화
 
     static Config from_file(const std::string& path) {
         std::ifstream in(path);
@@ -53,6 +56,15 @@ struct Config {
             if (j.contains("connection_pool_max_idle_per_endpoint")) {
                 config.connection_pool_max_idle_per_endpoint =
                     j.at("connection_pool_max_idle_per_endpoint").get<std::size_t>();
+            }
+            if (j.contains("connect_timeout_seconds")) {
+                config.connect_timeout_seconds = j.at("connect_timeout_seconds").get<unsigned>();
+            }
+            if (j.contains("buffer_pool_max_free")) {
+                config.buffer_pool_max_free = j.at("buffer_pool_max_free").get<std::size_t>();
+            }
+            if (j.contains("metrics_report_interval_seconds")) {
+                config.metrics_report_interval_seconds = j.at("metrics_report_interval_seconds").get<unsigned>();
             }
 
             if (!j.contains("upstreams") || !j.at("upstreams").is_array() || j.at("upstreams").empty()) {

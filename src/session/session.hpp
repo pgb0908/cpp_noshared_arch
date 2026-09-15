@@ -51,7 +51,7 @@ private:
             endpoint_index_, [this, self](const net::Error& err, std::unique_ptr<net::ISocket> socket) {
                 assert_on_owning_thread();
                 if (!err.ok() || !socket) {
-                    ++metrics_.upstream_connect_errors;
+                    metrics_.upstream_connect_errors.fetch_add(1, std::memory_order_relaxed);
                     upstream_healthy_ = false;
                     close();
                     return;
@@ -89,7 +89,7 @@ private:
                             close();
                             return;
                         }
-                        metrics_.bytes_downstream_to_upstream += written;
+                        metrics_.bytes_downstream_to_upstream.fetch_add(written, std::memory_order_relaxed);
                         relay_downstream_to_upstream();
                     });
             });
@@ -115,7 +115,7 @@ private:
                             close();
                             return;
                         }
-                        metrics_.bytes_upstream_to_downstream += written;
+                        metrics_.bytes_upstream_to_downstream.fetch_add(written, std::memory_order_relaxed);
                         relay_upstream_to_downstream();
                     });
             });
@@ -153,6 +153,15 @@ private:
                 upstream_->shutdown();
                 upstream_->close();
             }
+        }
+
+        // 다 쓴 버퍼는 버리지 않고 shard-local BufferPool의 free-list에
+        // 반납해서 다음 Session이 재사용하게 한다.
+        if (down_to_up_buf_) {
+            buffer_pool_.release(std::move(down_to_up_buf_));
+        }
+        if (up_to_down_buf_) {
+            buffer_pool_.release(std::move(up_to_down_buf_));
         }
 
         metrics_.on_close();

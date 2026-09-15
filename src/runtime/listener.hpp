@@ -40,19 +40,14 @@ private:
                 next_shard_ = (next_shard_ + 1) % shards_.size();
 
                 net::IEventLoop& target_loop = target_shard.event_loop();
-                // IEventLoop::post()는 std::function<void()>를 받는데,
-                // 이건 어차피 한 번만 실행될 콜백이라도 복사 생성 가능한
-                // 대상을 요구한다 -- unique_ptr 캡처만으로는 복사가 안
-                // 되므로 shared_ptr로 먼저 감싼다.
-                auto boxed_sock = std::make_shared<std::unique_ptr<net::ISocket>>(std::move(socket));
-                target_loop.post([&target_shard, &target_loop, boxed_sock]() {
+                target_loop.post([&target_shard, &target_loop, socket = std::move(socket)]() mutable {
                     // 이 시점에 accept된 소켓은 아직 이 Listener의 event
                     // loop에 바인딩돼 있다. adopt_socket()이 이걸 shard
                     // 자신의 loop로 재바인딩해서, 이 connection의 이후
                     // 모든 I/O가 실제로 shard의 스레드에서 실행되게
                     // 만든다 -- listener 스레드가 아니라. net/event_loop.hpp
                     // 참고.
-                    auto rebound = target_loop.adopt_socket(std::move(*boxed_sock));
+                    auto rebound = target_loop.adopt_socket(std::move(socket));
                     target_shard.dispatch_accept(std::move(rebound));
                 });
             } else {

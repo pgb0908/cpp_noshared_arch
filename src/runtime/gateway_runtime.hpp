@@ -8,6 +8,7 @@
 #include "net/event_loop.hpp"
 #include "runtime/gateway_shard.hpp"
 #include "runtime/listener.hpp"
+#include "runtime/metrics_aggregator.hpp"
 
 // shard 풀과 단일 accept listener를 소유한다. 각 GatewayShard는 자신의
 // upstream을 독립적으로 resolve하고 관리한다 (UpstreamManager 참고).
@@ -30,6 +31,7 @@ private:
     std::unique_ptr<net::IEventLoop> listener_event_loop_;
     std::unique_ptr<Listener> listener_;
     std::thread listener_thread_;
+    std::unique_ptr<MetricsAggregator> metrics_aggregator_;
 
     bool stopped_ = false;
 };

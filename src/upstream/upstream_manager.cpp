@@ -68,17 +68,40 @@ void UpstreamManager::acquire_connection(std::size_t index, net::SocketCallback 
     auto socket = event_loop_.create_socket();
     net::ISocket* raw = socket.get();
     const net::Endpoint target = endpoints_[index].resolved;
-    // net::ErrorCallback은 std::function이라 복사 생성 가능한 대상을
-    // 요구한다 -- 이 콜백은 어차피 한 번만 실행되지만 unique_ptr을
-    // 그대로 캡처하면 복사가 안 되므로, shared_ptr로 먼저 감싼다
-    // (Listener::do_accept()와 동일한 패턴).
-    auto boxed_socket = std::make_shared<std::unique_ptr<net::ISocket>>(std::move(socket));
-    raw->async_connect(target, [boxed_socket, callback = std::move(callback)](const net::Error& err) {
+
+    // connect 타임아웃: timer와 async_connect가 서로 경쟁하고, 먼저
+    // 끝나는 쪽이 상대방의 리소스(소켓/timer)를 정리해줘야 한다. 즉
+    // socket/timer/callback 모두 "두 콜백 양쪽에서 접근 가능해야 하는"
+    // 진짜 공유 상태다 -- Listener::do_accept()처럼 단순히 한 곳으로만
+    // 넘기면 끝나는 상황(그쪽은 MoveOnlyFunction으로 boxing 없이
+    // 해결됨)과 달리, 여기선 shared_ptr가 원래 의도된 정확한 도구다.
+    auto shared_socket = std::make_shared<std::unique_ptr<net::ISocket>>(std::move(socket));
+    auto timer = event_loop_.create_timer();
+    auto shared_timer = std::make_shared<std::unique_ptr<net::ITimer>>(std::move(timer));
+    auto shared_callback = std::make_shared<net::SocketCallback>(std::move(callback));
+    auto done = std::make_shared<bool>(false);
+
+    (*shared_timer)->expires_after(std::chrono::seconds(config_.connect_timeout_seconds));
+    (*shared_timer)->async_wait([shared_socket, shared_callback, done](const net::Error& err) {
+        if (*done || !err.ok()) {
+            return;  // 이미 처리됐거나(connect가 먼저 끝남), timer가 cancel된 것
+        }
+        *done = true;
+        (*shared_socket)->cancel();
+        (*shared_callback)(net::Error{1, "upstream connect timed out"}, nullptr);
+    });
+
+    raw->async_connect(target, [shared_socket, shared_timer, shared_callback, done](const net::Error& err) {
+        if (*done) {
+            return;  // 타임아웃이 먼저 발생해서 이미 처리됨
+        }
+        *done = true;
+        (*shared_timer)->cancel();
         if (!err.ok()) {
-            callback(err, nullptr);
+            (*shared_callback)(err, nullptr);
             return;
         }
-        callback(net::Error::none(), std::move(*boxed_socket));
+        (*shared_callback)(net::Error::none(), std::move(*shared_socket));
     });
 }
 

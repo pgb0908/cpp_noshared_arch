@@ -14,7 +14,7 @@ public:
 
     void run() override;
     void stop() override;
-    void post(std::function<void()> task) override;
+    void post(net::VoidCallback task) override;
     bool is_current_thread() const noexcept override;
 
     std::unique_ptr<net::ISocket> create_socket() override;

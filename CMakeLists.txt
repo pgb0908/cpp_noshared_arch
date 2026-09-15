@@ -34,3 +34,32 @@ add_executable(perCoreShard
 target_include_directories(perCoreShard PRIVATE src)
 target_link_libraries(perCoreShard PRIVATE Boost::headers Boost::system Threads::Threads nlohmann_json::nlohmann_json)
 target_compile_definitions(perCoreShard PRIVATE BOOST_ASIO_NO_DEPRECATED)
+
+# 테스트: GTest가 없으면 조용히 건너뛰고 본체(perCoreShard)만 빌드한다.
+# 테스트 대상(BufferPool/LocalMetrics/Config/UpstreamManager/Session)은
+# net/ 인터페이스만 거치므로, 테스트 바이너리엔 Boost 구현체(net/boost/)가
+# 전혀 필요 없다 -- tests/fakes/의 가짜 구현체로 대체.
+find_package(GTest QUIET)
+if(GTest_FOUND)
+    enable_testing()
+
+    add_executable(perCoreShard_tests
+        src/upstream/upstream_manager.cpp
+        tests/buffer_pool_test.cpp
+        tests/local_metrics_test.cpp
+        tests/config_test.cpp
+        tests/upstream_manager_test.cpp
+        tests/session_test.cpp
+    )
+    target_include_directories(perCoreShard_tests PRIVATE src tests)
+    target_link_libraries(perCoreShard_tests PRIVATE
+        nlohmann_json::nlohmann_json
+        GTest::gtest
+        GTest::gtest_main
+    )
+
+    include(GoogleTest)
+    gtest_discover_tests(perCoreShard_tests)
+else()
+    message(STATUS "GTest not found -- skipping perCoreShard_tests target")
+endif()

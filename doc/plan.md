@@ -69,25 +69,43 @@ Boost.Asio에서 `acceptor.async_accept(handler)`로 받은 소켓은 **acceptor
 
 ---
 
-## Phase 4 — Timer / Buffer / Metrics 완전 Local화 (다음 단계 후보)
+## Phase 4 — Timer / Buffer / Metrics 완전 Local화 ✅
 
-### TimerManager (신규, shard-local)
-```text
-GatewayShard::TimerManager
-├─ Upstream Connect Timeout   # Session::connect_upstream()에 steady_timer 추가
-├─ Connection Idle Timeout    # 일정 시간 무입출력 시 close()
-├─ Request Timeout            # HTTP 레이어 도입 후 적용 (Phase 진입 시점에 따라 순서 조정 가능)
-└─ Retry Timer                # Phase 3 ConnectionPool과 연동
-```
-가장 먼저 처리할 항목은 **upstream connect timeout** — 지금 `Session::connect_upstream()`은 timeout이 없어 upstream이 응답 없으면 무한 대기한다 (직전 대화에서 확인된 이슈). `boost::asio::steady_timer` 하나를 `Session`에 추가해서 `async_connect`와 경합시키는 것으로 최소 구현 가능.
+세 가지를 한 패스로 구현 완료.
 
-### 실제 BufferPool (free-list)
-현재 `src/buffer_pool.hpp`는 `acquire()`마다 `new`, `release()`에서 그냥 버림. 이를 shard-local free-list로 바꿔서 buffer 재사용 → allocation/free 빈도 감소 (문서 section 14의 목표).
+### 1. Upstream Connect Timeout
+`UpstreamManager::acquire_connection()`의 fresh-connect 경로에 `net::ITimer` 하나를 추가해서 `async_connect`와 경합시킴 (`src/upstream/upstream_manager.cpp`). 먼저 끝나는 쪽이 "승자"가 되고 나머지는 `done` 플래그로 무시됨 — 타임아웃이 이기면 `socket->cancel()`로 pending connect를 끊는다. `Config::connect_timeout_seconds`로 설정 (기본 5초). 블랙홀 IP로 실측 검증 — 설정값과 거의 일치하는 시간에 정확히 타임아웃되고 `connect_errors` 카운터도 증가함을 확인.
 
-### MetricsAggregator
-현재는 종료 시(`GatewayRuntime::print_metrics_summary`) 1회 합산뿐. 운영 중 관찰이 필요하면:
-- 주기적 타이머로 각 shard의 `LocalMetrics`를 읽어 집계 (읽기만 하므로 lock 불필요 — 단, cache-line 경계 때문에 다른 스레드가 읽는 동안 tearing 가능성은 낮지만 완전한 원자성은 없음. 필요하면 개별 필드를 `std::atomic`이 아니라 "근사치로 충분"하다는 전제로 그대로 두거나, snapshot 복사 방식 고려)
-- 간단한 `/metrics` HTTP endpoint 또는 stdout periodic dump로 노출
+TimerManager를 별도 클래스로 만들지, 이렇게 각 기능(UpstreamManager, MetricsAggregator)이 필요할 때 `net::ITimer`를 직접 쓰는 방식으로 갈지는 후자로 결정 — 지금 시점엔 "모든 timer를 한곳에 모으는 것"보다 "각 도메인이 자기 timer를 직접 소유하는 것"이 더 단순하고 `net::IEventLoop`이 이미 timer factory 역할을 하고 있어서 중복 추상화가 될 뻔함. Connection Idle Timeout / Request Timeout은 각각 HTTP 레이어와 idle-connection 정리가 실제로 필요해지는 시점에 붙이기로 미룸.
+
+### 2. 실제 BufferPool (free-list)
+`src/util/buffer_pool.hpp`가 shard-local free-list를 갖도록 변경. `acquire()`는 free-list에 있으면 재사용, 없으면 새로 `new`. `release()`는 그냥 버리지 않고 free-list에 반납 (상한 `Config::buffer_pool_max_free`, 기본 256 — 초과분은 버림). `Session::close()`가 두 relay 버퍼를 명시적으로 `buffer_pool_.release()`하도록 수정 (이전엔 Session 소멸과 함께 그냥 버려졌음).
+
+### 3. MetricsAggregator
+`src/runtime/metrics_aggregator.hpp` 신설. `GatewayRuntime`이 소유하고 listener의 event loop에서 주기적으로(`Config::metrics_report_interval_seconds`, 기본 10초, 0이면 비활성화) 전체 shard의 `LocalMetrics`를 합산해 `[metrics] ...` 형태로 stdout에 출력. `std::endl`로 매번 flush — 파일/파이프 리다이렉트 시에도 바로 보이게 함 (버퍼링 때문에 5초 넘게 안 보이던 문제를 실측으로 발견하고 수정).
+
+**cross-thread read 안전성**: `LocalMetrics`의 모든 필드를 `std::atomic<uint64_t>` + `memory_order_relaxed`로 변경 (`src/util/local_metrics.hpp`). Single-writer(소유 shard)/occasional-reader(aggregator) 패턴이라 락도, seq_cst 순서 보장도 필요 없음 — 이전에 나눴던 "복사본은 왜 스레드 경합에 자유로운가" 대화에서 나온 두 선택지(atomic relaxed vs message passing) 중 전자를 택함. 종료 시 1회 요약(`print_metrics_summary`)도 동일하게 `.load(relaxed)`로 읽도록 수정.
+
+---
+
+## 인프라 리팩토링 2 — MoveOnlyFunction + 단위 테스트 스위트 ✅
+
+### MoveOnlyFunction 도입
+`net/` 인터페이스는 가상함수라 콜백 타입을 `std::function`으로 고정해야 했는데, `std::function`은 담기는 대상이 복사 가능해야 해서 `unique_ptr` 캡처(예: accept된 소켓을 shard로 넘길 때)마다 `shared_ptr<unique_ptr<T>>`로 감싸는 boxing이 필요했다. `src/util/move_only_function.hpp`에 `std::function`과 동일한 타입 소거 구조에 복사만 delete한 `MoveOnlyFunction<Signature>`를 직접 구현 (C++23 `std::move_only_function`을 C++20에서 대체, Seastar/Chromium 등의 자체 move-only 콜백과 동일한 해법). `net::VoidCallback/ErrorCallback/IoCallback/SocketCallback/AcceptCallback`을 전부 이걸로 교체.
+
+이 변경으로 `Listener::do_accept()`의 boxing은 완전히 제거됨 (단일 목적지로 이동하는 단순 케이스였음). 반면 `UpstreamManager::acquire_connection()`의 boxing은 유지 — 거긴 connect와 timeout이라는 **두 개의 독립된 비동기 작업이 같은 socket/timer/callback에 동시 접근**해야 하는 진짜 공유 상태라, `shared_ptr`가 원래 맞는 도구였던 케이스임 (자세한 구분은 대화 로그 참고).
+
+### 단위 테스트 스위트 (GoogleTest)
+`libgtest-dev` 설치, `tests/` 디렉토리 신설. `net::IEventLoop/ISocket/IResolver/ITimer`의 가짜 구현체(`tests/fakes/`)를 만들어서, 실제 소켓/스레드/시간 경과 없이 `post()`된 작업을 큐에 쌓고 테스트가 `pump()`로 한 스텝씩 결정론적으로 실행시키는 방식으로 async 로직을 검증한다. 이게 net/ 추상화 계층을 처음 만들 때 의도했던 "테스트 가능성"이 실제로 증명된 지점.
+
+커버리지:
+- `BufferPool`: free-list 재사용, LIFO 순서, `max_free` 상한
+- `LocalMetrics`: 카운터 정확성, `alignas(64)` 검증
+- `Config`: JSON 파싱 성공 경로 (단, `Config::from_file`이 에러 시 `std::exit(1)`을 직접 호출해서 에러 경로는 테스트 프로세스를 죽이므로 검증 불가 — `main.cpp`가 catch하는 예외 방식으로 리팩토링하면 해결 가능, 지금은 미룸)
+- `UpstreamManager`: round-robin, pool 재사용/상한, **connect timeout 경쟁 조건**(timeout이 이기는 경우/connect가 이기는 경우/뒤늦은 완료가 무시되는 경우 전부)
+- `Session`: 양방향 relay, downstream 종료 시 upstream 풀 반납, upstream 종료 시 미반납, connect 실패 처리, 버퍼 반납까지
+
+`cmake --build` 시 GTest 없으면 조용히 테스트 타겟을 건너뛰고 본체만 빌드 (`find_package(GTest QUIET)`).
 
 ---
 

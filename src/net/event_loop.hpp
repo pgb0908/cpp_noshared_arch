@@ -1,13 +1,13 @@
 #pragma once
 
 #include <cstdint>
-#include <functional>
 #include <memory>
 
 #include "net/acceptor.hpp"
 #include "net/resolver.hpp"
 #include "net/socket.hpp"
 #include "net/timer.hpp"
+#include "net/types.hpp"
 
 namespace net {
 
@@ -23,7 +23,7 @@ public:
 
     virtual void run() = 0;   // stop()까지 호출한 스레드를 blocking
     virtual void stop() = 0;
-    virtual void post(std::function<void()> task) = 0;
+    virtual void post(VoidCallback task) = 0;
 
     // 이 loop의 run()을 현재 실행 중인 스레드에서 호출됐으면 true.
     // run()이 아직 한 번도 호출 안 됐으면 항상 false. shard가 소유한

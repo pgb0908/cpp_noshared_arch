@@ -1,6 +1,5 @@
 #pragma once
 
-#include <functional>
 #include <memory>
 
 #include "net/socket.hpp"
@@ -8,7 +7,7 @@
 
 namespace net {
 
-using AcceptCallback = std::function<void(const Error&, std::unique_ptr<ISocket>)>;
+using AcceptCallback = MoveOnlyFunction<void(const Error&, std::unique_ptr<ISocket>)>;
 
 class IAcceptor {
 public:

@@ -25,11 +25,19 @@ void GatewayRuntime::start() {
 
     listener_event_loop_ = net::boost_asio::create_event_loop();
     listener_ = std::make_unique<Listener>(*listener_event_loop_, config_.listen_port, shards_);
+    metrics_aggregator_ =
+        std::make_unique<MetricsAggregator>(*listener_event_loop_, shards_, config_.metrics_report_interval_seconds);
     listener_->start();
-    listener_thread_ = std::thread([this] { listener_event_loop_->run(); });
+    listener_thread_ = std::thread([this] {
+        // MetricsAggregator의 timer도 UpstreamManager의 DNS refresh timer와
+        // 같은 이유로 run() 호출 전, 이 스레드 안에서 start()한다.
+        metrics_aggregator_->start();
+        listener_event_loop_->run();
+    });
 
     std::cout << "perCoreShard listening on 0.0.0.0:" << config_.listen_port << " -> "
-              << config_.upstreams.size() << " upstream endpoint(s), " << shards_.size() << " shard(s)\n";
+              << config_.upstreams.size() << " upstream endpoint(s), " << shards_.size() << " shard(s)"
+              << std::endl;
 }
 
 void GatewayRuntime::stop() {
@@ -39,6 +47,7 @@ void GatewayRuntime::stop() {
     stopped_ = true;
 
     listener_->stop();
+    metrics_aggregator_->stop();
     listener_event_loop_->stop();
     if (listener_thread_.joinable()) {
         listener_thread_.join();
@@ -68,18 +77,23 @@ void GatewayRuntime::print_metrics_summary() const {
     std::cout << "\n--- shard metrics ---\n";
     for (const auto& shard : shards_) {
         const LocalMetrics& m = shard->metrics();
-        std::cout << "shard " << shard->index() << ": accepted=" << m.connections_accepted
-                   << " active=" << m.connections_active << " closed=" << m.connections_closed
-                   << " down->up=" << m.bytes_downstream_to_upstream
-                   << "B up->down=" << m.bytes_upstream_to_downstream
-                   << "B connect_errors=" << m.upstream_connect_errors << "\n";
+        const uint64_t accepted = m.connections_accepted.load(std::memory_order_relaxed);
+        const uint64_t active = m.connections_active.load(std::memory_order_relaxed);
+        const uint64_t closed = m.connections_closed.load(std::memory_order_relaxed);
+        const uint64_t down_up = m.bytes_downstream_to_upstream.load(std::memory_order_relaxed);
+        const uint64_t up_down = m.bytes_upstream_to_downstream.load(std::memory_order_relaxed);
+        const uint64_t connect_errors = m.upstream_connect_errors.load(std::memory_order_relaxed);
 
-        total_accepted += m.connections_accepted;
-        total_closed += m.connections_closed;
-        total_active += m.connections_active;
-        total_down_up_bytes += m.bytes_downstream_to_upstream;
-        total_up_down_bytes += m.bytes_upstream_to_downstream;
-        total_connect_errors += m.upstream_connect_errors;
+        std::cout << "shard " << shard->index() << ": accepted=" << accepted << " active=" << active
+                   << " closed=" << closed << " down->up=" << down_up << "B up->down=" << up_down
+                   << "B connect_errors=" << connect_errors << "\n";
+
+        total_accepted += accepted;
+        total_closed += closed;
+        total_active += active;
+        total_down_up_bytes += down_up;
+        total_up_down_bytes += up_down;
+        total_connect_errors += connect_errors;
     }
     std::cout << "total: accepted=" << total_accepted << " active=" << total_active
                << " closed=" << total_closed << " down->up=" << total_down_up_bytes
