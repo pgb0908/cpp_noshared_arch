@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(perCoreShard CXX)
+project(perCoreShard CXX C)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,6 +18,26 @@ find_package(Boost 1.74 REQUIRED COMPONENTS system)
 find_package(Threads REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
+# llhttp (MIT, https://github.com/nodejs/llhttp) -- HTTP 파싱만 담당하는
+# 의존성 없는 C 라이브러리. third_party/llhttp/에 release 브랜치의
+# pre-generated 소스를 vendoring (빌드에 Node.js 불필요). 직렬화는
+# llhttp에 없어서 net/http/native/에 직접 구현 (외부 의존성 없음).
+add_library(llhttp STATIC
+    third_party/llhttp/src/api.c
+    third_party/llhttp/src/http.c
+    third_party/llhttp/src/llhttp.c
+)
+target_include_directories(llhttp PUBLIC third_party/llhttp/include)
+
+set(PERCORESHARD_HTTP_SOURCES
+    src/net/llhttp/factory.cpp
+    src/net/llhttp/request_parser.cpp
+    src/net/llhttp/response_parser.cpp
+    src/net/http/native/factory.cpp
+    src/net/http/native/request_serializer.cpp
+    src/net/http/native/response_serializer.cpp
+)
+
 add_executable(perCoreShard
     main.cpp
     src/runtime/gateway_shard.cpp
@@ -29,10 +49,11 @@ add_executable(perCoreShard
     src/net/boost/resolver.cpp
     src/net/boost/socket.cpp
     src/net/boost/timer.cpp
+    ${PERCORESHARD_HTTP_SOURCES}
 )
 
 target_include_directories(perCoreShard PRIVATE src)
-target_link_libraries(perCoreShard PRIVATE Boost::headers Boost::system Threads::Threads nlohmann_json::nlohmann_json)
+target_link_libraries(perCoreShard PRIVATE Boost::headers Boost::system Threads::Threads nlohmann_json::nlohmann_json llhttp)
 target_compile_definitions(perCoreShard PRIVATE BOOST_ASIO_NO_DEPRECATED)
 
 # 테스트: GTest가 없으면 조용히 건너뛰고 본체(perCoreShard)만 빌드한다.
@@ -45,15 +66,21 @@ if(GTest_FOUND)
 
     add_executable(perCoreShard_tests
         src/upstream/upstream_manager.cpp
+        ${PERCORESHARD_HTTP_SOURCES}
         tests/buffer_pool_test.cpp
         tests/local_metrics_test.cpp
         tests/config_test.cpp
         tests/upstream_manager_test.cpp
         tests/session_test.cpp
+        tests/http_request_parser_test.cpp
+        tests/http_response_parser_test.cpp
+        tests/http_request_serializer_test.cpp
+        tests/http_response_serializer_test.cpp
     )
     target_include_directories(perCoreShard_tests PRIVATE src tests)
     target_link_libraries(perCoreShard_tests PRIVATE
         nlohmann_json::nlohmann_json
+        llhttp
         GTest::gtest
         GTest::gtest_main
     )

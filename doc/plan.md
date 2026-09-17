@@ -152,13 +152,45 @@ GatewayShard #N ── 자체 listen socket (SO_REUSEPORT)
 
 위 Phase 1~7은 "아키텍처적 강건함" 축이고, 이것과 별개로 "기능" 축이 있다 (최초 대화에서 "결국 API Gateway까지 단계적으로"라고 확인됨). 아키텍처 Phase와 인터리빙해서 진행 가능.
 
-1. **Boost.Beast HTTP relay**: `Session`을 raw byte relay에서 HTTP request/response 파싱 기반으로 교체(또는 병행 — L4/L7 모드 선택 가능하게). `boost::beast::http::async_read`/`async_write` 사용.
+1. **HTTP relay (파싱 엔진)** ✅ 부분 완료 — 아래 상세
 2. **RouteSnapshot / 라우팅**: 문서 section 11의 Immutable Snapshot + Atomic Pointer Swap 패턴으로 Route table 도입. Host/Path 기준 매칭.
 3. **Policy/Filter 체인**: 요청/응답 변형, 헤더 조작 등.
 4. **RuntimeConfigManager**: 설정 hot reload — 새 `RuntimeSnapshot` 생성 후 각 shard에 atomic pointer swap으로 배포, 기존 요청은 기존 snapshot으로 계속 처리.
 5. **TLS**: downstream/upstream 각각 별도로 검토 (termination vs passthrough).
 
-**의사결정 필요:** HTTP 도입을 몇 번째 순서로 넣을지 — 예를 들어 Phase 3(Upstream Pool)보다 먼저 Beast부터 넣을 수도 있음. 우선순위는 사용자가 다음에 확인하고 싶은 것에 따라 정하면 됨.
+---
+
+### HTTP relay — 파싱/직렬화 엔진 ✅ (Session 연동은 미완료)
+
+**범위 결정 경위**: 처음엔 Boost.Beast를 파싱 엔진으로만 쓰는 방안을 검토했으나(스트림 개념 없이 `http::parser<buffer_body>`만 순수 상태기계로 사용), 사용자가 "Beast의 사고방식에 지배당하고 싶지 않다, 제품만의 개성 있는 구조를 원한다"고 명시적으로 요청 — Beast를 완전히 배제하는 방향으로 전환. 대안으로 hand-roll 파서와 기존 라이브러리 사용을 저울질하다, **llhttp**(Node.js가 현재 쓰는 HTTP 파서, MIT, 의존성 없는 C 라이브러리)로 확정. apt로 안 되어서 `third_party/llhttp/`에 release 브랜치의 pre-generated 소스(api.c/http.c/llhttp.c + llhttp.h)를 직접 vendoring (Node.js 빌드 툴체인 불필요).
+
+**구조**:
+```text
+net::http::              # 라이브러리 독립적 인터페이스 + 값 타입
+├─ types.hpp              # RequestHead, ResponseHead, Header
+├─ parser.hpp              # IRequestParser, IResponseParser
+└─ serializer.hpp          # IRequestSerializer, IResponseSerializer
+
+net::llhttp_backend/      # llhttp로 구현한 파서 (third_party/llhttp/ 사용)
+├─ request_parser.{hpp,cpp}
+├─ response_parser.{hpp,cpp}
+└─ factory.{hpp,cpp}
+
+net::http::native/        # 직접 구현한 시리얼라이저 (외부 의존성 없음 —
+│                          #  llhttp는 파싱만 하고 직렬화는 안 해줌, 그리고
+│                          #  "내가 emit하는 바이트는 내가 다 통제"라 직접
+│                          #  짜는 게 파싱보다 오히려 안전/단순함)
+├─ request_serializer.{hpp,cpp}
+├─ response_serializer.{hpp,cpp}
+├─ detail.hpp               # chunked framing 등 공용 헬퍼
+└─ factory.{hpp,cpp}
+```
+
+파서와 시리얼라이저 모두 **I/O와 완전히 분리된 순수 상태 기계** — `net::ISocket`으로 읽은 raw 바이트를 `feed()`에 먹이고, 내보낼 바이트는 `pull()`로 뽑아내는 구조라 (net/event_loop.hpp 때와 마찬가지로) 스트림 개념 없이 조립 가능. Content-Length와 chunked transfer encoding 둘 다 지원 (llhttp가 파싱 쪽을, `detail::append_chunk`가 직렬화 쪽을 처리).
+
+**테스트**: `tests/http_request_parser_test.cpp`, `http_response_parser_test.cpp`, `http_request_serializer_test.cpp`, `http_response_serializer_test.cpp` — 15개, Content-Length/chunked/바이트 단위 분할 feed/malformed 입력/작은 out 버퍼로 나눠 pull 등 전부 통과.
+
+**아직 안 된 것**: 이 파서/시리얼라이저를 실제로 `net::ISocket` 기반 relay 루프에 연결하는 HTTP 세션 (지금의 raw byte relay `Session`을 대체하거나 HTTP 모드로 확장하는 부분). 다음 세션에서 이어서 진행.
 
 ---
 
