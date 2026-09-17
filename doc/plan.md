@@ -2,24 +2,43 @@
 
 `doc/per-core-sharded-architecture.md`의 Phase 1~7 전략과, 이번 대화에서 나온 실무적 이슈(DNS 재조회, connect timeout 등)를 결합해 앞으로의 작업을 정리한다. 각 Phase는 이전 Phase가 끝나야만 시작 가능한 건 아니고, 문서 자체도 "단계별 리팩토링 전략"이라고 명시했듯 **점진적** 진행을 전제로 한다.
 
+### 한눈에 보는 현재 상태 (2026-09-17 기준)
+
+| 항목 | 상태 |
+|---|---|
+| Phase 1 (Event Loop 분리) | ✅ 완료 |
+| Phase 2 (Connection Ownership) | ✅ 완료 |
+| Phase 3 (Upstream Pool Sharding) | ✅ 완료 |
+| Phase 4 (Timer/Buffer/Metrics Local화) | ✅ 완료 |
+| net/ 추상화 계층 (Boost.Asio 디커플링) | ✅ 완료 |
+| MoveOnlyFunction + 단위 테스트 스위트 | ✅ 완료 (GTest 42개) |
+| HTTP 파싱/직렬화 엔진 (llhttp + 자체 시리얼라이저) | ✅ 완료 (테스트 15개 포함, 총 GTest 57개) |
+| HTTP 엔진을 실제 relay에 연결 (HttpSession) | ⏳ **다음 작업** |
+| Phase 5 (CPU Affinity 고도화) | 미착수 |
+| Phase 6 (프로파일링 기반 Hot Path 최적화) | 미착수 |
+| Phase 7 (SO_REUSEPORT) | 미착수 |
+| 라우팅/정책/RuntimeConfigManager/TLS | 미착수 |
+
+지금 여전히 `Session`(`src/session/session.hpp`)은 **순수 TCP byte relay**만 한다 — HTTP 파싱/직렬화 엔진(`net::http::`, `net::llhttp_backend::`, `net::http::native::`)은 완성돼서 단위 테스트까지 통과했지만, 아직 `net::ISocket` 기반 relay 루프에 연결되지 않았다. 다음 세션의 최우선 작업은 이 연결(HttpSession 또는 Session의 HTTP 모드 확장).
+
 ---
 
 ## 현재 상태 (완료)
 
 ### Phase 1 — Event Loop 분리 ✅
-`GatewayShard`마다 독립 `io_context` + pinned thread (`src/gateway_shard.hpp/.cpp`, `src/cpu_affinity.hpp`).
+`GatewayShard`마다 독립 event loop + pinned thread (`src/runtime/gateway_shard.hpp/.cpp`, `src/util/cpu_affinity.hpp`). 이후 인프라 리팩토링에서 `net::IEventLoop` 인터페이스 뒤로 옮겨짐 (아래 참고).
 
 ### Phase 2 — Connection Ownership ✅
-`Listener`가 accept한 소켓을 round-robin으로 정확히 하나의 `GatewayShard`에 `asio::post`로 위임, 그 shard가 `Session` 생명주기 전체를 소유 (`src/listener.hpp`, `src/session.hpp`).
+`Listener`가 accept한 소켓을 round-robin으로 정확히 하나의 `GatewayShard`에 위임, 그 shard가 `Session` 생명주기 전체를 소유 (`src/runtime/listener.hpp`, `src/session/session.hpp`).
 
 MVP 범위: 순수 TCP byte relay, 단일 고정 upstream, HTTP 파싱 없음. git 첫 커밋(`e4b0ab1`) 완료.
 
-**알려진 갭 (당시 기준, 일부는 Phase 3에서 이미 해소됨):**
+**알려진 갭 (당시 기준, 전부 이후 Phase에서 해소됨):**
 - ~~upstream 1개 고정, 커넥션 재사용 없음~~ → Phase 3에서 해결 (다중 upstream + Connection Pool)
 - ~~DNS resolve가 부팅 시 1회뿐~~ → Phase 3에서 해결 (주기적 재조회)
-- upstream connect에 타임아웃 없음 → 여전히 Phase 4 대기
-- `BufferPool`이 실제 pool이 아니라 매번 new/delete → 여전히 Phase 4 대기
-- Listener가 단일 스레드 → Phase 7에서 재검토
+- ~~upstream connect에 타임아웃 없음~~ → Phase 4에서 해결
+- ~~`BufferPool`이 실제 pool이 아니라 매번 new/delete~~ → Phase 4에서 해결
+- Listener가 단일 스레드 → 여전히 Phase 7 대기 (SO_REUSEPORT)
 
 ---
 
@@ -196,6 +215,13 @@ net::http::native/        # 직접 구현한 시리얼라이저 (외부 의존�
 
 ## 다음 세션 시작 시 체크할 것
 
-- 위 로드맵 중 어느 Phase/기능부터 진행할지 확인 (grill-me로 결정 트리 재확인 권장)
-- Phase 3부터 진행한다면: config 포맷 확장 여부부터 결정
-- HTTP부터 진행한다면: Beast 도입이 `Session`을 완전히 대체하는지, 아니면 raw relay 모드와 공존시키는지부터 결정
+**최우선 후보: HTTP 엔진을 Session에 연결하기.** 파서/시리얼라이저(`net::http::`, `net::llhttp_backend::`, `net::http::native::`)는 완성/테스트됐지만 아직 아무 데서도 실제로 쓰이지 않는다. 진행 전에 확인할 것:
+- 지금의 raw byte relay `Session`을 HTTP 전용으로 **완전히 대체**할지, 아니면 L4(raw)/L7(HTTP) **모드를 선택**할 수 있게 공존시킬지
+- `UpstreamManager`의 connection pool과 HTTP keep-alive를 어떻게 엮을지 (지금 pool은 "아직 열려있는 TCP 연결" 기준이지, "이 연결이 다음 HTTP 요청을 받아도 되는 상태인지"는 모름 — pool에서 꺼낸 연결이 실제로 keep-alive 가능한지 검증 로직이 필요할 수 있음)
+- 지금 시리얼라이저는 `provide_body({nullptr,0}, true)`를 body 없는 메시지에도 호출해야 하는 계약이 있음 (`net/http/serializer.hpp` 주석 참고) — 실제 relay 루프 구현 시 이 호출을 빠뜨리지 않도록 주의
+
+**그다음 후보들** (HTTP 연결이 끝난 뒤, 또는 병행 가능):
+- 라우팅/정책 (RouteSnapshot) — HTTP 세션이 있어야 의미가 생김
+- Phase 5/6/7 (CPU Affinity 고도화 / 프로파일링 기반 최적화 / SO_REUSEPORT) — 지금까지는 기능 구현 위주였고 실측 성능 검증은 아직 한 번도 안 함
+
+진행할 방향은 grill-me 스타일로 결정 트리를 다시 확인한 뒤 착수할 것 (이 세션 전체에서 일관되게 써온 패턴).
