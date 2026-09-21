@@ -30,9 +30,9 @@ add_library(llhttp STATIC
 target_include_directories(llhttp PUBLIC third_party/llhttp/include)
 
 set(PERCORESHARD_HTTP_SOURCES
-    src/net/llhttp/factory.cpp
-    src/net/llhttp/request_parser.cpp
-    src/net/llhttp/response_parser.cpp
+    src/net/http/llhttp/factory.cpp
+    src/net/http/llhttp/request_parser.cpp
+    src/net/http/llhttp/response_parser.cpp
     src/net/http/native/factory.cpp
     src/net/http/native/request_serializer.cpp
     src/net/http/native/response_serializer.cpp

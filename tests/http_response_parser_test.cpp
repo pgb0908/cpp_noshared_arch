@@ -1,10 +1,10 @@
-#include "net/llhttp/response_parser.hpp"
+#include "net/http/llhttp/response_parser.hpp"
 
 #include <gtest/gtest.h>
 
 #include <string>
 
-using net::llhttp_backend::LlhttpResponseParser;
+using net::http::llhttp_backend::LlhttpResponseParser;
 
 namespace {
 
@@ -37,6 +37,20 @@ TEST(LlhttpResponseParser, 상태줄과_헤더가_올바르게_파싱된다) {
     EXPECT_EQ(parser.head().version, 11u);
     ASSERT_TRUE(parser.message_done());
     EXPECT_EQ(drain_body(parser), "hi");
+}
+
+TEST(LlhttpResponseParser, 대용량_body도_한번에_feed하면_전부_파싱된다) {
+    // 회귀 테스트: LlhttpRequestParser의 동일 테스트 참고.
+    LlhttpResponseParser parser;
+    const std::string body(200000, 'Y');
+    const std::string raw =
+        "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+
+    parser.feed(buf(raw));
+
+    EXPECT_FALSE(parser.has_error());
+    ASSERT_TRUE(parser.message_done());
+    EXPECT_EQ(drain_body(parser), body);
 }
 
 TEST(LlhttpResponseParser, 404_응답도_정상_파싱된다) {

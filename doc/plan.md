@@ -2,7 +2,7 @@
 
 `doc/per-core-sharded-architecture.md`의 Phase 1~7 전략과, 이번 대화에서 나온 실무적 이슈(DNS 재조회, connect timeout 등)를 결합해 앞으로의 작업을 정리한다. 각 Phase는 이전 Phase가 끝나야만 시작 가능한 건 아니고, 문서 자체도 "단계별 리팩토링 전략"이라고 명시했듯 **점진적** 진행을 전제로 한다.
 
-### 한눈에 보는 현재 상태 (2026-09-17 기준)
+### 한눈에 보는 현재 상태 (2026-09-21 기준)
 
 | 항목 | 상태 |
 |---|---|
@@ -11,15 +11,16 @@
 | Phase 3 (Upstream Pool Sharding) | ✅ 완료 |
 | Phase 4 (Timer/Buffer/Metrics Local화) | ✅ 완료 |
 | net/ 추상화 계층 (Boost.Asio 디커플링) | ✅ 완료 |
-| MoveOnlyFunction + 단위 테스트 스위트 | ✅ 완료 (GTest 42개) |
-| HTTP 파싱/직렬화 엔진 (llhttp + 자체 시리얼라이저) | ✅ 완료 (테스트 15개 포함, 총 GTest 57개) |
-| HTTP 엔진을 실제 relay에 연결 (HttpSession) | ⏳ **다음 작업** |
+| MoveOnlyFunction + 단위 테스트 스위트 | ✅ 완료 |
+| HTTP 파싱/직렬화 엔진 (llhttp + 자체 시리얼라이저) | ✅ 완료 |
+| **HTTP 엔진을 실제 relay에 연결 (`HttpSession`)** | ✅ **완료** — `Session`(raw relay)을 완전히 대체, 실측 검증(curl, 대용량 body) 통과 |
+| GTest 전체 | 44개, 전부 통과 |
 | Phase 5 (CPU Affinity 고도화) | 미착수 |
 | Phase 6 (프로파일링 기반 Hot Path 최적화) | 미착수 |
 | Phase 7 (SO_REUSEPORT) | 미착수 |
 | 라우팅/정책/RuntimeConfigManager/TLS | 미착수 |
 
-지금 여전히 `Session`(`src/session/session.hpp`)은 **순수 TCP byte relay**만 한다 — HTTP 파싱/직렬화 엔진(`net::http::`, `net::llhttp_backend::`, `net::http::native::`)은 완성돼서 단위 테스트까지 통과했지만, 아직 `net::ISocket` 기반 relay 루프에 연결되지 않았다. 다음 세션의 최우선 작업은 이 연결(HttpSession 또는 Session의 HTTP 모드 확장).
+`src/session/http_session.hpp`(`HttpSession`)가 이제 실제 요청 경로다. `Session`(`src/session/session.hpp`, raw byte relay)은 삭제하지 않고 참고용으로 남아있지만 더 이상 `GatewayShard::dispatch_accept()`에서 쓰이지 않는다.
 
 ---
 
@@ -179,49 +180,52 @@ GatewayShard #N ── 자체 listen socket (SO_REUSEPORT)
 
 ---
 
-### HTTP relay — 파싱/직렬화 엔진 ✅ (Session 연동은 미완료)
+### HTTP relay — 파싱/직렬화 엔진 + Session 연동 ✅ 완료
 
 **범위 결정 경위**: 처음엔 Boost.Beast를 파싱 엔진으로만 쓰는 방안을 검토했으나(스트림 개념 없이 `http::parser<buffer_body>`만 순수 상태기계로 사용), 사용자가 "Beast의 사고방식에 지배당하고 싶지 않다, 제품만의 개성 있는 구조를 원한다"고 명시적으로 요청 — Beast를 완전히 배제하는 방향으로 전환. 대안으로 hand-roll 파서와 기존 라이브러리 사용을 저울질하다, **llhttp**(Node.js가 현재 쓰는 HTTP 파서, MIT, 의존성 없는 C 라이브러리)로 확정. apt로 안 되어서 `third_party/llhttp/`에 release 브랜치의 pre-generated 소스(api.c/http.c/llhttp.c + llhttp.h)를 직접 vendoring (Node.js 빌드 툴체인 불필요).
 
-**구조**:
+**구조** (`llhttp/`가 `http/`와 형제 디렉토리로 있으면 헷갈린다는 피드백으로, 구현체 두 개(파싱=llhttp, 직렬화=native) 다 `net/http/` 아래로 통일):
 ```text
-net::http::              # 라이브러리 독립적 인터페이스 + 값 타입
-├─ types.hpp              # RequestHead, ResponseHead, Header
-├─ parser.hpp              # IRequestParser, IResponseParser
-└─ serializer.hpp          # IRequestSerializer, IResponseSerializer
-
-net::llhttp_backend/      # llhttp로 구현한 파서 (third_party/llhttp/ 사용)
-├─ request_parser.{hpp,cpp}
-├─ response_parser.{hpp,cpp}
-└─ factory.{hpp,cpp}
-
-net::http::native/        # 직접 구현한 시리얼라이저 (외부 의존성 없음 —
-│                          #  llhttp는 파싱만 하고 직렬화는 안 해줌, 그리고
-│                          #  "내가 emit하는 바이트는 내가 다 통제"라 직접
-│                          #  짜는 게 파싱보다 오히려 안전/단순함)
-├─ request_serializer.{hpp,cpp}
-├─ response_serializer.{hpp,cpp}
-├─ detail.hpp               # chunked framing 등 공용 헬퍼
-└─ factory.{hpp,cpp}
+src/net/http/             # 라이브러리 독립적 인터페이스 + 값 타입
+├─ types.hpp               # RequestHead, ResponseHead, Header
+├─ parser.hpp               # IRequestParser, IResponseParser
+├─ serializer.hpp           # IRequestSerializer, IResponseSerializer
+│
+├─ llhttp/                  # 파싱 구현체 (third_party/llhttp/ 사용)
+│  ├─ request_parser.{hpp,cpp}
+│  ├─ response_parser.{hpp,cpp}
+│  └─ factory.{hpp,cpp}      # net::http::llhttp_backend 네임스페이스
+│
+└─ native/                  # 직렬화 구현체 (외부 의존성 없음 --
+   │                         #  llhttp는 파싱만 하고 직렬화는 안 해줌, 그리고
+   │                         #  "내가 emit하는 바이트는 내가 다 통제"라 직접
+   │                         #  짜는 게 파싱보다 오히려 안전/단순함)
+   ├─ request_serializer.{hpp,cpp}
+   ├─ response_serializer.{hpp,cpp}
+   ├─ detail.hpp              # chunked framing 등 공용 헬퍼
+   └─ factory.{hpp,cpp}
 ```
 
-파서와 시리얼라이저 모두 **I/O와 완전히 분리된 순수 상태 기계** — `net::ISocket`으로 읽은 raw 바이트를 `feed()`에 먹이고, 내보낼 바이트는 `pull()`로 뽑아내는 구조라 (net/event_loop.hpp 때와 마찬가지로) 스트림 개념 없이 조립 가능. Content-Length와 chunked transfer encoding 둘 다 지원 (llhttp가 파싱 쪽을, `detail::append_chunk`가 직렬화 쪽을 처리).
+파서와 시리얼라이저 모두 **I/O와 완전히 분리된 순수 상태 기계** — `net::ISocket`으로 읽은 raw 바이트를 `feed()`에 먹이고, 내보낼 바이트는 `pull()`로 뽑아내는 구조라 (net/event_loop.hpp 때와 마찬가지로) 스트림 개념 없이 조립 가능. Content-Length와 chunked transfer encoding 둘 다 지원.
 
-**테스트**: `tests/http_request_parser_test.cpp`, `http_response_parser_test.cpp`, `http_request_serializer_test.cpp`, `http_response_serializer_test.cpp` — 15개, Content-Length/chunked/바이트 단위 분할 feed/malformed 입력/작은 out 버퍼로 나눠 pull 등 전부 통과.
+**실사용 중 발견한 심각한 버그 (수정 완료)**: 최초 구현은 `on_body` 콜백이 body를 고정 크기(16KB) scratch buffer에 담다가 꽉 차면 `HPE_PAUSED`를 리턴해서 llhttp를 일시정지시키려 했다. 그런데 **llhttp의 `on_body`는 `HPE_PAUSED`를 지원하지 않는다** (llhttp.h 주석: `on_body`는 `0, -1, HPE_USER`만 가능 — `on_message_begin`/`on_headers_complete`/`on_message_complete`/`on_chunk_header`만 `HPE_PAUSED` 지원). 그래서 리턴값이 그냥 무시되고 파싱이 계속 진행되어, **body가 64KB(소켓 read 버퍼 크기)를 넘는 요청/응답에서 relay가 조용히 멈춰버리는 버그**가 있었다 (curl이 영원히 응답을 못 받고 hang). `tools/`로 하는 수동 테스트로는 안 잡히고 실제 큰 body(150KB)를 relay해보다가 발견 — 작은 페이로드만 테스트했다면 놓쳤을 버그. 수정: scratch를 고정 크기 배열 대신 `std::string`으로 바꿔서 pause 자체가 필요 없게 만듦 (실제 메모리 사용량은 caller가 `feed()`에 넘기는 raw 청크 크기로 자연히 bound됨). 재발 방지로 200KB body 파싱 테스트를 회귀 테스트로 추가.
 
-**아직 안 된 것**: 이 파서/시리얼라이저를 실제로 `net::ISocket` 기반 relay 루프에 연결하는 HTTP 세션 (지금의 raw byte relay `Session`을 대체하거나 HTTP 모드로 확장하는 부분). 다음 세션에서 이어서 진행.
+**`HttpSession` 연동** (`src/session/http_session.hpp`): raw byte relay `Session`을 완전히 대체 (`Session` 자체는 참고용으로 코드는 남겨뒀지만 더 이상 안 쓰임). 설계 요점:
+- HTTP는 파이프라이닝 미지원 전제 하에 반이중이라, raw relay처럼 양방향 동시 릴레이가 아니라 **"요청 relay 완료 → 응답 relay 시작"을 순차 진행**하는 구조로 단순화됨
+- **keep-alive 없음** (이번 MVP 범위, 사용자 확정): downstream/upstream 둘 다 요청/응답 1회만 처리하고 close. `UpstreamManager`의 connection pool은 그래서 HTTP relay에서 아예 안 씀 (`release_connection()` 호출 없음) — "pool에서 꺼낸 연결이 진짜 살아있는지 검증"이라는 어려운 문제를 자연히 피함
+- `provide_body({nullptr,0}, true)`를 body 없는 메시지에도 반드시 호출해야 하는 시리얼라이저 계약(문서화해뒀던 것)을 정확히 지킴
+
+**검증**: 실제 Python HTTP 서버(GET JSON 응답, POST body echo)를 upstream으로 세워 curl로 End-to-End 확인 — 일반 GET, 404, 동시 다중 요청(shard round-robin 분산 확인), POST body relay, 그리고 위 버그를 실제로 재현/수정 확인한 150KB·200KB POST body. GTest 44개(HTTP 파서 대용량 body 회귀 테스트 2개 포함) 전부 통과.
 
 ---
 
 ## 다음 세션 시작 시 체크할 것
 
-**최우선 후보: HTTP 엔진을 Session에 연결하기.** 파서/시리얼라이저(`net::http::`, `net::llhttp_backend::`, `net::http::native::`)는 완성/테스트됐지만 아직 아무 데서도 실제로 쓰이지 않는다. 진행 전에 확인할 것:
-- 지금의 raw byte relay `Session`을 HTTP 전용으로 **완전히 대체**할지, 아니면 L4(raw)/L7(HTTP) **모드를 선택**할 수 있게 공존시킬지
-- `UpstreamManager`의 connection pool과 HTTP keep-alive를 어떻게 엮을지 (지금 pool은 "아직 열려있는 TCP 연결" 기준이지, "이 연결이 다음 HTTP 요청을 받아도 되는 상태인지"는 모름 — pool에서 꺼낸 연결이 실제로 keep-alive 가능한지 검증 로직이 필요할 수 있음)
-- 지금 시리얼라이저는 `provide_body({nullptr,0}, true)`를 body 없는 메시지에도 호출해야 하는 계약이 있음 (`net/http/serializer.hpp` 주석 참고) — 실제 relay 루프 구현 시 이 호출을 빠뜨리지 않도록 주의
+HTTP 엔진 연동까지 끝나서, 이제 실제로 동작하는 HTTP 프록시가 됐다. 다음 후보들:
 
-**그다음 후보들** (HTTP 연결이 끝난 뒤, 또는 병행 가능):
-- 라우팅/정책 (RouteSnapshot) — HTTP 세션이 있어야 의미가 생김
-- Phase 5/6/7 (CPU Affinity 고도화 / 프로파일링 기반 최적화 / SO_REUSEPORT) — 지금까지는 기능 구현 위주였고 실측 성능 검증은 아직 한 번도 안 함
+- **라우팅/정책 (RouteSnapshot)** — 지금은 upstream 1개(혹은 여러 개 round-robin)로만 보내고 Host/Path 기반 분기가 없음. HTTP 세션이 생겼으니 이제 의미가 생기는 작업
+- **keep-alive 도입 여부 재검토** — 지금은 요청/응답 1회 후 무조건 close (의도된 MVP 단순화). 매 요청마다 TCP 3-way handshake + upstream connect를 새로 하는 비용이 실측으로 문제가 되면, downstream keep-alive부터 검토 (`doc/plan.md` 이전 버전에 있던 "UpstreamManager pool과 keep-alive 검증" 문제가 그때 다시 등장함)
+- **Phase 5/6/7** (CPU Affinity 고도화 / 프로파일링 기반 최적화 / SO_REUSEPORT) — 지금까지는 기능 구현 위주였고 실측 성능 검증(TPS, latency, 실제 CPU/cache 지표)은 아직 한 번도 안 함. HTTP 프록시가 이제 실제로 동작하니, 부하 테스트 도구(wrk/ab 등)로 처음 실측해볼 시점이기도 함
+- **에러 응답 처리** — upstream이 아예 죽어있거나 connect 실패 시, 지금은 그냥 downstream 소켓을 close해버림 (502 Bad Gateway 같은 정상적인 HTTP 에러 응답을 안 돌려줌). 실제 게이트웨이라면 이것도 필요
 
 진행할 방향은 grill-me 스타일로 결정 트리를 다시 확인한 뒤 착수할 것 (이 세션 전체에서 일관되게 써온 패턴).

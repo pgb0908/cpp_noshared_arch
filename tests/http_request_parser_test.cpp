@@ -1,10 +1,10 @@
-#include "net/llhttp/request_parser.hpp"
+#include "net/http/llhttp/request_parser.hpp"
 
 #include <gtest/gtest.h>
 
 #include <string>
 
-using net::llhttp_backend::LlhttpRequestParser;
+using net::http::llhttp_backend::LlhttpRequestParser;
 
 namespace {
 
@@ -78,6 +78,26 @@ TEST(LlhttpRequestParser, 바이트_단위로_쪼개서_feed해도_동일하게_
 
     ASSERT_TRUE(parser.message_done());
     EXPECT_EQ(drain_body(parser), "hello");
+}
+
+TEST(LlhttpRequestParser, 대용량_body도_한번에_feed하면_전부_파싱된다) {
+    // 회귀 테스트: on_body 콜백에서 HPE_PAUSED를 리턴해 고정 크기(16KB)
+    // scratch를 채우면 멈추려던 예전 구현은, llhttp의 on_body가
+    // HPE_PAUSED를 지원하지 않아 그 리턴값이 그냥 무시되는 버그가 있었다
+    // (실사용에서 body가 64KB 넘는 순간 relay가 멈춰버림). 이 테스트는
+    // scratch 상한(16KB)을 훨씬 넘는 body를 한 번의 feed()로 흘려보내서
+    // 그 버그가 재발하면 바로 잡히게 한다.
+    LlhttpRequestParser parser;
+    const std::string body(200000, 'X');
+    const std::string raw =
+        "POST /submit HTTP/1.1\r\nHost: example.com\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+
+    const std::size_t consumed = parser.feed(buf(raw));
+
+    EXPECT_EQ(consumed, raw.size());
+    EXPECT_FALSE(parser.has_error());
+    ASSERT_TRUE(parser.message_done());
+    EXPECT_EQ(drain_body(parser), body);
 }
 
 TEST(LlhttpRequestParser, 잘못된_요청은_에러로_처리된다) {

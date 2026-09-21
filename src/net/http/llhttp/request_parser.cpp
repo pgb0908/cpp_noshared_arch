@@ -1,8 +1,8 @@
-#include "net/llhttp/request_parser.hpp"
+#include "net/http/llhttp/request_parser.hpp"
 
 #include <cstring>
 
-namespace net::llhttp_backend {
+namespace net::http::llhttp_backend {
 
 LlhttpRequestParser::LlhttpRequestParser() {
     ::llhttp_settings_init(&settings_);
@@ -48,11 +48,10 @@ std::size_t LlhttpRequestParser::feed(net::ConstBuffer raw) {
 }
 
 std::size_t LlhttpRequestParser::read_body(net::MutableBuffer out) {
-    const std::size_t n = std::min(out.size, scratch_used_);
+    const std::size_t n = std::min(out.size, scratch_.size());
     if (n > 0) {
-        std::memcpy(out.data, scratch_, n);
-        std::memmove(scratch_, scratch_ + n, scratch_used_ - n);
-        scratch_used_ -= n;
+        std::memcpy(out.data, scratch_.data(), n);
+        scratch_.erase(0, n);
     }
     return n;
 }
@@ -101,19 +100,11 @@ int LlhttpRequestParser::on_headers_complete(::llhttp_t* p) {
 }
 
 int LlhttpRequestParser::on_body(::llhttp_t* p, const char* at, std::size_t len) {
-    auto& s = self(p);
-    const std::size_t space = kScratchSize - s.scratch_used_;
-    const std::size_t n = std::min(space, len);
-    std::memcpy(s.scratch_ + s.scratch_used_, at, n);
-    s.scratch_used_ += n;
-
-    if (n < len) {
-        // scratch가 꽉 찼다 -- 여기서 멈추고 caller가 read_body()로
-        // 비운 뒤 나머지를 다시 feed()하게 한다. llhttp_execute()가
-        // HPE_PAUSED를 반환하도록, 반드시 HPE_PAUSED를 리턴해야 함
-        // (llhttp_pause()를 콜백 안에서 직접 부르면 안 됨 -- 헤더 주석 참고).
-        return HPE_PAUSED;
-    }
+    // on_body는 HPE_PAUSED를 지원하지 않는다 (net/http/llhttp/request_parser.hpp의
+    // scratch_ 주석 참고) -- 그냥 다 받아서 쌓아둔다. caller가 feed()를
+    // 호출하는 raw 청크 크기만큼만 쌓였다가 바로 read_body()로 빠지므로
+    // 무한정 커지지 않는다.
+    self(p).scratch_.append(at, len);
     return HPE_OK;
 }
 
@@ -122,4 +113,4 @@ int LlhttpRequestParser::on_message_complete(::llhttp_t* p) {
     return HPE_OK;
 }
 
-}  // namespace net::llhttp_backend
+}  // namespace net::http::llhttp_backend

@@ -4,7 +4,7 @@
 
 #include "net/http/parser.hpp"
 
-namespace net::llhttp_backend {
+namespace net::http::llhttp_backend {
 
 // LlhttpRequestParser와 대칭 -- 자세한 설계 배경은 그쪽 주석 참고.
 class LlhttpResponseParser : public net::http::IResponseParser {
@@ -35,8 +35,6 @@ private:
 
     static LlhttpResponseParser& self(::llhttp_t* p) { return *static_cast<LlhttpResponseParser*>(p->data); }
 
-    static constexpr std::size_t kScratchSize = 16 * 1024;
-
     ::llhttp_t parser_{};
     ::llhttp_settings_t settings_{};
 
@@ -47,11 +45,12 @@ private:
     std::string pending_field_;
     std::string pending_value_;
 
-    char scratch_[kScratchSize];
-    std::size_t scratch_used_ = 0;
+    // 고정 크기가 아니라 std::string인 이유는 LlhttpRequestParser의
+    // scratch_ 주석 참고 -- on_body는 HPE_PAUSED를 지원하지 않는다.
+    std::string scratch_;
 
     bool has_error_ = false;
     net::Error error_;
 };
 
-}  // namespace net::llhttp_backend
+}  // namespace net::http::llhttp_backend

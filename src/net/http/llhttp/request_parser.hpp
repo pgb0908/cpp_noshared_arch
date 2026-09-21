@@ -4,7 +4,7 @@
 
 #include "net/http/parser.hpp"
 
-namespace net::llhttp_backend {
+namespace net::http::llhttp_backend {
 
 // llhttp(https://github.com/nodejs/llhttp, MIT, third_party/llhttp/에
 // pre-generated C 소스 vendoring)로 구현한 net::http::IRequestParser.
@@ -40,8 +40,6 @@ private:
 
     static LlhttpRequestParser& self(::llhttp_t* p) { return *static_cast<LlhttpRequestParser*>(p->data); }
 
-    static constexpr std::size_t kScratchSize = 16 * 1024;
-
     ::llhttp_t parser_{};
     ::llhttp_settings_t settings_{};
 
@@ -54,12 +52,20 @@ private:
     std::string pending_field_;
     std::string pending_value_;
 
-    char scratch_[kScratchSize];
-    std::size_t scratch_used_ = 0;
-    bool scratch_full_ = false;  // on_body 콜백이 scratch 꽉 차서 일시 정지시켰는지
+    // on_body가 넘겨주는 body 조각을 잠깐 쌓아두는 버퍼. 고정 크기가
+    // 아니라 std::string으로 늘어나게 둔 이유: llhttp의 on_body 콜백은
+    // (on_message_begin/on_headers_complete 등과 달리) HPE_PAUSED를
+    // 지원하지 않는다 (llhttp.h의 on_body 주석: "Possible return values
+    // 0, -1, HPE_USER"만 명시) -- 그래서 "scratch가 꽉 차면 콜백에서
+    // 멈춘다"는 접근 자체가 불가능하다 (실제로 시도했다가 요청 바디가
+    // 65536바이트 넘는 순간 relay가 멈추는 버그로 발견됨). 대신 caller가
+    // feed() 한 번에 넘기는 raw 바이트 크기(보통 소켓 read 버퍼 크기,
+    // 수십KB)만큼만 쌓였다가 곧바로 read_body()로 드레인되므로, 실질
+    // 메모리 사용량은 caller의 read 버퍼 크기로 자연히 bound된다.
+    std::string scratch_;
 
     bool has_error_ = false;
     net::Error error_;
 };
 
-}  // namespace net::llhttp_backend
+}  // namespace net::http::llhttp_backend

@@ -1,8 +1,8 @@
-#include "net/llhttp/response_parser.hpp"
+#include "net/http/llhttp/response_parser.hpp"
 
 #include <cstring>
 
-namespace net::llhttp_backend {
+namespace net::http::llhttp_backend {
 
 LlhttpResponseParser::LlhttpResponseParser() {
     ::llhttp_settings_init(&settings_);
@@ -45,11 +45,10 @@ std::size_t LlhttpResponseParser::feed(net::ConstBuffer raw) {
 }
 
 std::size_t LlhttpResponseParser::read_body(net::MutableBuffer out) {
-    const std::size_t n = std::min(out.size, scratch_used_);
+    const std::size_t n = std::min(out.size, scratch_.size());
     if (n > 0) {
-        std::memcpy(out.data, scratch_, n);
-        std::memmove(scratch_, scratch_ + n, scratch_used_ - n);
-        scratch_used_ -= n;
+        std::memcpy(out.data, scratch_.data(), n);
+        scratch_.erase(0, n);
     }
     return n;
 }
@@ -98,15 +97,9 @@ int LlhttpResponseParser::on_headers_complete(::llhttp_t* p) {
 }
 
 int LlhttpResponseParser::on_body(::llhttp_t* p, const char* at, std::size_t len) {
-    auto& s = self(p);
-    const std::size_t space = kScratchSize - s.scratch_used_;
-    const std::size_t n = std::min(space, len);
-    std::memcpy(s.scratch_ + s.scratch_used_, at, n);
-    s.scratch_used_ += n;
-
-    if (n < len) {
-        return HPE_PAUSED;
-    }
+    // on_body는 HPE_PAUSED를 지원하지 않는다 (request_parser.hpp의
+    // scratch_ 주석 참고) -- 그냥 다 받아서 쌓아둔다.
+    self(p).scratch_.append(at, len);
     return HPE_OK;
 }
 
@@ -115,4 +108,4 @@ int LlhttpResponseParser::on_message_complete(::llhttp_t* p) {
     return HPE_OK;
 }
 
-}  // namespace net::llhttp_backend
+}  // namespace net::http::llhttp_backend
