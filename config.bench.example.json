@@ -1,0 +1,14 @@
+{
+  "listen_port": 8080,
+  "shard_count": 4,
+  "buffer_size": 65536,
+  "dns_refresh_interval_seconds": 30,
+  "connection_pool_max_idle_per_endpoint": 8,
+  "connect_timeout_seconds": 5,
+  "buffer_pool_max_free": 256,
+  "metrics_report_interval_seconds": 0,
+  "upstreams": [
+    { "host": "127.0.0.1", "port": 9000 },
+    { "host": "127.0.0.1", "port": 9001 }
+  ]
+}
