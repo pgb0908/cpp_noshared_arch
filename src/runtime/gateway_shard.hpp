@@ -5,6 +5,7 @@
 #include <thread>
 
 #include "config/config.hpp"
+#include "filter/filter_chain.hpp"
 #include "net/event_loop.hpp"
 #include "net/socket.hpp"
 #include "upstream/upstream_manager.hpp"
@@ -46,4 +47,5 @@ private:
     BufferPool buffer_pool_;
     LocalMetrics metrics_;
     UpstreamManager upstream_manager_;
+    FilterChain filter_chain_;
 };

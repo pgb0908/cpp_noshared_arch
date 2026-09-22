@@ -13,8 +13,9 @@
 | net/ 추상화 계층 (Boost.Asio 디커플링) | ✅ 완료 |
 | MoveOnlyFunction + 단위 테스트 스위트 | ✅ 완료 |
 | HTTP 파싱/직렬화 엔진 (llhttp + 자체 시리얼라이저) | ✅ 완료 |
-| **HTTP 엔진을 실제 relay에 연결 (`HttpSession`)** | ✅ **완료** — `Session`(raw relay)을 완전히 대체, 실측 검증(curl, 대용량 body) 통과 |
-| GTest 전체 | 44개, 전부 통과 |
+| HTTP 엔진을 실제 relay에 연결 (`HttpSession`) | ✅ 완료 — `Session`(raw relay)을 완전히 대체 |
+| **필터 체인 (Policy/Filter)** | ✅ **완료** — 헤더 대칭 인터페이스(`IFilter`) + onion 순서, 바디 필터(스트리밍/버퍼링, watermark) 추가, upstream 연결 전에 거부 가능함을 실측 확인 |
+| GTest 전체 | 50개, 전부 통과 |
 | Phase 5 (CPU Affinity 고도화) | 미착수 |
 | Phase 6 (프로파일링 기반 Hot Path 최적화) | 미착수 |
 | Phase 7 (SO_REUSEPORT) | 미착수 |
@@ -172,10 +173,10 @@ GatewayShard #N ── 자체 listen socket (SO_REUSEPORT)
 
 위 Phase 1~7은 "아키텍처적 강건함" 축이고, 이것과 별개로 "기능" 축이 있다 (최초 대화에서 "결국 API Gateway까지 단계적으로"라고 확인됨). 아키텍처 Phase와 인터리빙해서 진행 가능.
 
-1. **HTTP relay (파싱 엔진)** ✅ 부분 완료 — 아래 상세
-2. **RouteSnapshot / 라우팅**: 문서 section 11의 Immutable Snapshot + Atomic Pointer Swap 패턴으로 Route table 도입. Host/Path 기준 매칭.
-3. **Policy/Filter 체인**: 요청/응답 변형, 헤더 조작 등.
-4. **RuntimeConfigManager**: 설정 hot reload — 새 `RuntimeSnapshot` 생성 후 각 shard에 atomic pointer swap으로 배포, 기존 요청은 기존 snapshot으로 계속 처리.
+1. **HTTP relay (파싱 엔진 + Session 연동)** ✅ 완료 — 아래 상세
+2. **Policy/Filter 체인** ✅ 완료 — 아래 상세 (원래 순서상 라우팅 다음이었는데, 사용자가 "필터를 거친 구조화된 데이터를 upstream에 보내고 싶다"고 먼저 요청해서 순서를 당김)
+3. **RouteSnapshot / 라우팅**: 문서 section 11의 Immutable Snapshot + Atomic Pointer Swap 패턴으로 Route table 도입. Host/Path 기준 매칭. 필터 체인이 이미 있으니, 라우팅 결과에 따라 필터를 다르게 적용하는 것도 고려 가능.
+4. **RuntimeConfigManager**: 설정 hot reload — 새 `RuntimeSnapshot` 생성 후 각 shard에 atomic pointer swap으로 배포, 기존 요청은 기존 snapshot으로 계속 처리. 필터 체인을 지금처럼 코드에서 고정하지 않고 config로 구성하고 싶어지면 이것과 함께 재검토.
 5. **TLS**: downstream/upstream 각각 별도로 검토 (termination vs passthrough).
 
 ---
@@ -215,17 +216,82 @@ src/net/http/             # 라이브러리 독립적 인터페이스 + 값 타�
 - **keep-alive 없음** (이번 MVP 범위, 사용자 확정): downstream/upstream 둘 다 요청/응답 1회만 처리하고 close. `UpstreamManager`의 connection pool은 그래서 HTTP relay에서 아예 안 씀 (`release_connection()` 호출 없음) — "pool에서 꺼낸 연결이 진짜 살아있는지 검증"이라는 어려운 문제를 자연히 피함
 - `provide_body({nullptr,0}, true)`를 body 없는 메시지에도 반드시 호출해야 하는 시리얼라이저 계약(문서화해뒀던 것)을 정확히 지킴
 
-**검증**: 실제 Python HTTP 서버(GET JSON 응답, POST body echo)를 upstream으로 세워 curl로 End-to-End 확인 — 일반 GET, 404, 동시 다중 요청(shard round-robin 분산 확인), POST body relay, 그리고 위 버그를 실제로 재현/수정 확인한 150KB·200KB POST body. GTest 44개(HTTP 파서 대용량 body 회귀 테스트 2개 포함) 전부 통과.
+**검증**: 실제 Python HTTP 서버(GET JSON 응답, POST body echo)를 upstream으로 세워 curl로 End-to-End 확인 — 일반 GET, 404, 동시 다중 요청(shard round-robin 분산 확인), POST body relay, 그리고 위 버그를 실제로 재현/수정 확인한 150KB·200KB POST body.
+
+---
+
+### Policy/Filter 체인 ✅ 완료
+
+**계기**: 사용자가 "파싱 후 구조화된 데이터가 필터 체인을 거쳐 upstream으로 가면 좋겠다"고 직접 요청 — API Gateway의 핵심 기능이라 로드맵 순서(라우팅 다음)를 당김.
+
+**설계 확정 사항** (grill-me로 확인, 헤더 단계):
+- 필터는 헤더/target 수정 + 요청 거부(short-circuit) 둘 다 가능
+- 요청/응답 메서드가 한 인터페이스(`IFilter`)에 대칭으로 존재 (Envoy/Proxygen처럼) -- 처음엔 `IRequestFilter`/`IResponseFilter`로 분리했다가, 사용자가 "downstream->upstream/upstream->downstream 메서드가 대칭이었으면 좋겠다"고 요청해서 통합
+- 필터 인스턴스는 세션별이 아니라 **shard당 싱글턴** (Envoy는 스트림별 인스턴스이지만, 필터 간 데이터 공유(인증->rate limit)까지 고려하면 싱글턴+`FilterContext` 조합이 더 단순하다고 판단 -- grill로 확인)
+- 응답은 등록 **역순**으로 실행 (onion 모델, Envoy/Netty와 동일)
+- 지금 단계는 코드에서 직접 필터 리스트 구성 (config 기반 동적 구성은 RuntimeConfigManager 생기면 재검토)
+
+**구조**:
+```text
+src/filter/
+├─ filter.hpp                 # IFilter -- on_request/on_response(헤더) + on_request_data/on_response_data(바디) 대칭
+├─ filter_context.hpp         # FilterContext, ContextKey<T> -- 세션 스코프 상태 (필터가 싱글턴이라 필요)
+├─ filter_direct_response.hpp # DirectResponse{head, body} -- 아래 두 Result 타입의 공통 페이로드
+├─ filter_header_result.hpp   # FilterHeaderAction/FilterHeaderResult (헤더 단계 전용)
+├─ filter_data_result.hpp     # FilterDataAction/FilterDataResult (바디 단계 전용, kStopIterationAndBuffer 포함)
+├─ filter_chain.hpp           # FilterChain -- 등록 순/역순 실행, apply_data() 헬퍼로 바디 순회 중복 제거
+├─ via_header_filter.hpp      # 예시 필터 (RFC 7230 Via 헤더 추가)
+└─ default_filters.{hpp,cpp}  # build_default_filter_chain() -- 지금은 Via 필터만 등록
+```
+
+`GatewayShard`가 `FilterChain`을 소유(shard마다 독립 인스턴스, shared-nothing 원칙 유지)하고 `HttpSession`에 참조로 넘긴다.
+
+**`HttpSession`의 핵심 재구성**: 필터가 요청을 거부하면 **upstream에 연결할 필요조차 없어야** 해서 (인증 실패한 요청 때문에 백엔드 커넥션을 열 이유가 없음), 기존에 "먼저 upstream 연결 → 그다음 요청 relay"였던 순서를 "요청 헤더 파싱 → 필터 실행 → (통과 시) 그제서야 upstream 연결"로 뒤집었다. 요청 필터가 `kRespondDirectly`를 반환하면 `upstream_`은 끝까지 null인 채로 세션이 종료된다. 응답 필터는 이미 upstream이 연결된 뒤라 구조가 더 단순 (응답 헤더 파싱 후 필터만 끼워넣음).
+
+**검증(헤더 단계)**: 실제 Python 업스트림으로 (1) 요청/응답 양쪽에 `Via: 1.1 perCoreShard` 헤더가 실제로 붙는 것을 curl -v로 확인 (2) 임시로 "전부 거부" 필터를 넣고 401이 즉시 반환되면서 **upstream의 accept 카운트가 전혀 늘지 않는 것**(= 진짜로 연결을 안 함)을 실측 확인 후 제거.
+
+---
+
+#### 바디 필터 (스트리밍 + 버퍼링) ✅ 완료
+
+**계기**: "Envoy/Proxygen처럼 바디 접근 + 버퍼링 인터페이스도 있어야 하지 않냐"는 질문에서 시작. Envoy의 실제 모델(`decodeData(Buffer&, bool end_stream)`, `StopIterationAndBuffer`로 필터가 버퍼링을 요청하면 프레임워크가 대신 누적)을 그대로 채택하기로 grill로 확인.
+
+**설계 확정 사항**:
+- `IFilter::on_request_data(std::string& data, bool end_stream, FilterContext&)` / `on_response_data(...)` 대칭 추가. `FilterDataResult`는 `kContinue`/`kRespondDirectly`/`kStopIterationAndBuffer` 3가지 (헤더용 `FilterHeaderResult`와 타입을 분리 -- Envoy도 `FilterHeadersStatus`/`FilterDataStatus`를 나눔)
+- 필터가 `kStopIterationAndBuffer`를 반환하면 다음 청크가 올 때마다 누적 버퍼로 그 필터를 다시 호출 (Envoy와 동일한 호출 패턴). 버퍼 자체는 필터 인스턴스가 싱글턴이라 필터 멤버에 못 두므로, `HttpSession`이 방향별 `FilterChain::DataIterationState`(막힌 필터 인덱스 + 누적 버퍼)를 들고 있음
+- **watermark는 Envoy의 high/low 이중 구조를 안 씀** -- grill 중 발견: 우리 구조(HTTP/1.1, keep-alive 없음, 커넥션당 요청 1개)엔 이중 watermark가 의미를 가질 조건(필터의 부분 방출 API, HTTP/2 멀티플렉싱)이 둘 다 없고, 오히려 "바디 전체가 필요한 필터 + read 일시정지"를 같이 쓰면 데드락이 됨(필터가 풀리는 조건 자체가 "끝까지 다 받아야"인데 read를 멈추면 영원히 못 받음). Envoy의 `envoy.filters.http.buffer`도 이 카테고리는 watermark pause/resume이 아니라 `max_request_bytes` 하드 캡 + 즉시 에러로 처리한다는 걸 확인하고 동일하게 결정: `Config::body_buffer_high_watermark_bytes`(기본 1MB) 하나만 두고 초과 시 즉시 413(요청)/502(응답) 거부, read pause 없음
+
+**실측 중 발견한 버그(수정 완료)**: 필터가 `end_stream` 청크에서도 `kStopIterationAndBuffer`를 반환하면(계약 위반) 처음엔 `assert()`로 프로세스 전체가 죽었음 -- 필터 작성자의 실수 하나로 서버 전체가 죽으면 안 되므로 방어적으로 누적분을 그대로 흘려보내고 강제 종결하도록 수정. 그다음엔 이 방어 로직이 watermark 체크보다 먼저 실행돼서 **단일 청크로 끝나는 요청은 413을 완전히 우회**하는 문제를 발견(이전 호출들이 체크를 통과해왔다는 전제가 이번이 처음이자 마지막 호출인 경우 성립하지 않음) -- watermark 체크를 항상 먼저 하도록 순서 수정.
+
+**검증**: GTest `FilterChainData` 4개(스트리밍 통과 중 필터가 data mutate, 버퍼링 중 뒤 필터로 안 넘어감, 데이터 필터 거부, 응답 onion 순서) 추가. 실제 Python 업스트림으로 GET(바디 없음)/소량 POST/200KB POST(다중 4KB 드레인) e2e 확인, 임시 "항상 버퍼링" 필터 + watermark 16바이트로 낮춰서 413 실제 발생까지 실측 확인 후 제거.
+
+GTest 총 55개 전부 통과.
+
+**아직 안 한 것**: `HttpSession` 자체의 GTest 커버리지 없음 (net::ISocket Fake + 실제 llhttp 파서를 엮어야 해서 upstream_manager_test.cpp/session_test.cpp보다 훨씬 큰 작업 -- 지금은 실측 curl 테스트로만 검증됨). 실제 정책성 필터(인증, rate limit 등)와 상태 있는 스트리밍 변환 필터(gzip 등)는 예시로만 논의됐고 아직 프로덕션에 없음 -- 후자를 실제로 추가하게 되면 `FilterContext`가 핫 패스(매 청크) 접근에 적합한지(현재 `std::any` 기반) 재검토 필요.
+
+---
+
+#### `BodyFilterGate` 추출 ✅ 완료
+
+**계기**: `http_session.hpp`가 512줄까지 늘어나면서 "소켓 I/O 오케스트레이션"과 "필터 적용 정책(watermark 판단)"이 한 클래스에 섞여 있다는 지적. 특히 후자는 위 두 버그(assert 크래시, watermark 우회)가 실제로 났던 부분인데도 `HttpSession`에 끼워져 있어서 소켓/upstream 없이는 GTest로 직접 검증할 수 없었음.
+
+`process_request_data_chunk()`/`process_response_data_chunk()`가 하던 "필터에 청크를 통과시키고 watermark 넘으면 413/502 판단"을 `src/filter/body_filter_gate.hpp`의 `BodyFilterGate`로 뽑아냄. `HttpSession`은 이제 `BodyFilterGate::Result`(kForward/kStillBuffering/kReject)만 받아서 시리얼라이저/`respond_directly()`에 연결하는 얇은 어댑터 역할만 함. `FilterChain::DataIterationState`(요청/응답 각각)도 `HttpSession` 대신 `BodyFilterGate`가 소유.
+
+**검증**: 위에서 발견한 두 버그(assert 크래시, watermark 순서)를 `tests/body_filter_gate_test.cpp`에 회귀 테스트로 고정 (소켓/파서 없이 순수 로직만). GTest 총 63개 전부 통과, 리팩토링 후 실제 upstream으로 GET/POST e2e 재확인.
+
+**미룬 것**: `HttpSession` 자체의 "소켓 I/O" 부분(선언/구현 분리, `.hpp`/`.cpp`)은 별도 결정 대기 -- 지금은 필터 정책 분리만 우선 완료.
 
 ---
 
 ## 다음 세션 시작 시 체크할 것
 
-HTTP 엔진 연동까지 끝나서, 이제 실제로 동작하는 HTTP 프록시가 됐다. 다음 후보들:
+HTTP 엔진 연동 + 필터 체인까지 끝나서, 이제 실제로 동작하는 (아주 기초적인) API Gateway가 됐다. 다음 후보들:
 
-- **라우팅/정책 (RouteSnapshot)** — 지금은 upstream 1개(혹은 여러 개 round-robin)로만 보내고 Host/Path 기반 분기가 없음. HTTP 세션이 생겼으니 이제 의미가 생기는 작업
-- **keep-alive 도입 여부 재검토** — 지금은 요청/응답 1회 후 무조건 close (의도된 MVP 단순화). 매 요청마다 TCP 3-way handshake + upstream connect를 새로 하는 비용이 실측으로 문제가 되면, downstream keep-alive부터 검토 (`doc/plan.md` 이전 버전에 있던 "UpstreamManager pool과 keep-alive 검증" 문제가 그때 다시 등장함)
+- **실제 정책 필터 추가** — 지금은 예시(Via 헤더)뿐. 인증(JWT 검증 등), rate limiting, CORS 같은 실제 필터를 `src/filter/`에 추가. `IRequestFilter`/`IResponseFilter` 인터페이스는 이미 있으니 새 필터 클래스 + `build_default_filter_chain()`에 등록만 하면 됨
+- **라우팅 (RouteSnapshot)** — 지금은 upstream 1개(혹은 여러 개 round-robin)로만 보내고 Host/Path 기반 분기가 없음. 필터 체인과 결합하면 "이 경로엔 이 필터만" 같은 라우트별 정책도 가능해짐
+- **connect 실패 시 502 응답** — 지금 `HttpSession::connect_upstream()`이 실패하면 그냥 downstream을 close해버림 (정상적인 HTTP 에러 응답 없음). `respond_directly()`를 이미 필터 short-circuit용으로 만들어뒀으니, 같은 메커니즘을 connect 실패 시에도 재사용해서 502 Bad Gateway를 돌려주는 게 자연스러운 다음 스텝
+- **`HttpSession` 자체의 GTest 커버리지** — 지금은 실측 curl 테스트로만 검증됨. Fake 소켓 + 실제 llhttp 파서를 엮은 통합 테스트를 추가하면 회귀 방지에 도움
+- **keep-alive 도입 여부 재검토** — 지금은 요청/응답 1회 후 무조건 close. 매 요청마다 TCP 3-way handshake + upstream connect를 새로 하는 비용이 실측으로 문제가 되면 검토 (`UpstreamManager` pool과 keep-alive 검증 문제가 그때 다시 등장함)
 - **Phase 5/6/7** (CPU Affinity 고도화 / 프로파일링 기반 최적화 / SO_REUSEPORT) — 지금까지는 기능 구현 위주였고 실측 성능 검증(TPS, latency, 실제 CPU/cache 지표)은 아직 한 번도 안 함. HTTP 프록시가 이제 실제로 동작하니, 부하 테스트 도구(wrk/ab 등)로 처음 실측해볼 시점이기도 함
-- **에러 응답 처리** — upstream이 아예 죽어있거나 connect 실패 시, 지금은 그냥 downstream 소켓을 close해버림 (502 Bad Gateway 같은 정상적인 HTTP 에러 응답을 안 돌려줌). 실제 게이트웨이라면 이것도 필요
 
 진행할 방향은 grill-me 스타일로 결정 트리를 다시 확인한 뒤 착수할 것 (이 세션 전체에서 일관되게 써온 패턴).

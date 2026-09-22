@@ -2,6 +2,7 @@
 
 #include <cassert>
 
+#include "filter/default_filters.hpp"
 #include "net/boost/factory.hpp"
 #include "session/http_session.hpp"
 #include "util/cpu_affinity.hpp"
@@ -11,7 +12,8 @@ GatewayShard::GatewayShard(std::size_t index, const Config& config)
       config_(config),
       event_loop_(net::boost_asio::create_event_loop()),
       buffer_pool_(config.buffer_size, config.buffer_pool_max_free),
-      upstream_manager_(*event_loop_, config_) {}
+      upstream_manager_(*event_loop_, config_),
+      filter_chain_(build_default_filter_chain()) {}
 
 void GatewayShard::start(int cpu_core) {
     thread_ = std::thread([this, cpu_core] {
@@ -36,7 +38,7 @@ void GatewayShard::dispatch_accept(std::unique_ptr<net::ISocket> socket) {
     // net/event_loop.hpp의 adopt_socket() 주석 참고.
     assert(event_loop_->is_current_thread() && "dispatch_accept() called from a non-owning thread");
 
-    auto session =
-        std::make_shared<HttpSession>(std::move(socket), *event_loop_, upstream_manager_, buffer_pool_, metrics_);
+    auto session = std::make_shared<HttpSession>(std::move(socket), *event_loop_, upstream_manager_, buffer_pool_,
+                                                  filter_chain_, config_.body_buffer_high_watermark_bytes, metrics_);
     session->start();
 }

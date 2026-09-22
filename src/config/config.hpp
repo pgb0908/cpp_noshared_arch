@@ -23,6 +23,12 @@ struct Config {
     unsigned connect_timeout_seconds = 5;             // upstream connect 타임아웃
     std::size_t buffer_pool_max_free = 256;            // shard-local BufferPool free-list 상한
     unsigned metrics_report_interval_seconds = 10;      // 0이면 주기적 리포트 비활성화
+    // 바디 필터(IFilter::on_request_data/on_response_data)가 kStopIterationAndBuffer로
+    // 누적을 요청했을 때 허용하는 최대 버퍼 크기. 넘으면 즉시 413으로 거부한다 --
+    // read를 멈췄다 재개하는 watermark 방식은 안 씀 (doc/plan.md 참고: 바디 전체가
+    // 필요한 필터 + read 일시정지를 같이 쓰면 데드락이 됨. Envoy의
+    // envoy.filters.http.buffer도 같은 이유로 하드 캡 + 즉시 에러로 처리).
+    std::size_t body_buffer_high_watermark_bytes = 1 * 1024 * 1024;
 
     static Config from_file(const std::string& path) {
         std::ifstream in(path);
@@ -65,6 +71,9 @@ struct Config {
             }
             if (j.contains("metrics_report_interval_seconds")) {
                 config.metrics_report_interval_seconds = j.at("metrics_report_interval_seconds").get<unsigned>();
+            }
+            if (j.contains("body_buffer_high_watermark_bytes")) {
+                config.body_buffer_high_watermark_bytes = j.at("body_buffer_high_watermark_bytes").get<std::size_t>();
             }
 
             if (!j.contains("upstreams") || !j.at("upstreams").is_array() || j.at("upstreams").empty()) {

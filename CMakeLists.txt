@@ -38,6 +38,10 @@ set(PERCORESHARD_HTTP_SOURCES
     src/net/http/native/response_serializer.cpp
 )
 
+set(PERCORESHARD_FILTER_SOURCES
+    src/filter/default_filters.cpp
+)
+
 add_executable(perCoreShard
     main.cpp
     src/runtime/gateway_shard.cpp
@@ -50,6 +54,7 @@ add_executable(perCoreShard
     src/net/boost/socket.cpp
     src/net/boost/timer.cpp
     ${PERCORESHARD_HTTP_SOURCES}
+    ${PERCORESHARD_FILTER_SOURCES}
 )
 
 target_include_directories(perCoreShard PRIVATE src)
@@ -67,6 +72,7 @@ if(GTest_FOUND)
     add_executable(perCoreShard_tests
         src/upstream/upstream_manager.cpp
         ${PERCORESHARD_HTTP_SOURCES}
+        ${PERCORESHARD_FILTER_SOURCES}
         tests/buffer_pool_test.cpp
         tests/local_metrics_test.cpp
         tests/config_test.cpp
@@ -76,6 +82,8 @@ if(GTest_FOUND)
         tests/http_response_parser_test.cpp
         tests/http_request_serializer_test.cpp
         tests/http_response_serializer_test.cpp
+        tests/filter_chain_test.cpp
+        tests/body_filter_gate_test.cpp
     )
     target_include_directories(perCoreShard_tests PRIVATE src tests)
     target_link_libraries(perCoreShard_tests PRIVATE
