@@ -46,6 +46,7 @@ add_executable(perCoreShard
     main.cpp
     src/runtime/gateway_shard.cpp
     src/runtime/gateway_runtime.cpp
+    src/session/http_session.cpp
     src/upstream/upstream_manager.cpp
     src/net/boost/acceptor.cpp
     src/net/boost/event_loop.cpp

@@ -279,7 +279,13 @@ GTest 총 55개 전부 통과.
 
 **검증**: 위에서 발견한 두 버그(assert 크래시, watermark 순서)를 `tests/body_filter_gate_test.cpp`에 회귀 테스트로 고정 (소켓/파서 없이 순수 로직만). GTest 총 63개 전부 통과, 리팩토링 후 실제 upstream으로 GET/POST e2e 재확인.
 
-**미룬 것**: `HttpSession` 자체의 "소켓 I/O" 부분(선언/구현 분리, `.hpp`/`.cpp`)은 별도 결정 대기 -- 지금은 필터 정책 분리만 우선 완료.
+---
+
+#### `HttpSession` `.hpp`/`.cpp` 분리 ✅ 완료
+
+`UpstreamManager`와 같은 패턴(`.hpp`엔 클래스 선언 + 멤버만, `.cpp`엔 모든 메서드 구현)으로 기계적으로 분리. 설계 변경 없음 -- 순수하게 코드 위치만 옮김. `http_session.hpp`가 462줄 → 127줄로 줄어 클래스 인터페이스가 한눈에 들어옴, 구현(366줄)은 `http_session.cpp`로. `CMakeLists.txt`의 `perCoreShard` 타겟에 소스 추가 (GTest는 `HttpSession`을 직접 include하는 테스트가 없어서 `perCoreShard_tests`엔 불필요).
+
+GTest 63개 전부 통과 + 실제 upstream GET/POST e2e 재확인.
 
 ---
 
