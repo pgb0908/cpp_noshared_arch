@@ -104,7 +104,9 @@ int LlhttpResponseParser::on_body(::llhttp_t* p, const char* at, std::size_t len
 }
 
 int LlhttpResponseParser::on_message_complete(::llhttp_t* p) {
-    self(p).message_done_ = true;
+    auto& s = self(p);
+    s.should_keep_alive_ = ::llhttp_should_keep_alive(p) != 0;
+    s.message_done_ = true;
     return HPE_OK;
 }
 

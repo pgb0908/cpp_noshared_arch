@@ -17,11 +17,12 @@ BODY = b"OK"
 
 
 class Handler(BaseHTTPRequestHandler):
-    # keep-alive를 켜두면(HTTP/1.1 기본값) 스레드가 다음 요청을 기다리며
-    # 계속 살아있는데, 게이트웨이(HttpSession)는 keep-alive를 안 하므로
-    # 요청 하나 처리 후 항상 새 연결을 닫아버린다. HTTP/1.0으로 고정해서
-    # 이 서버도 매 응답 후 바로 닫도록 맞춘다.
-    protocol_version = "HTTP/1.0"
+    # HTTP/1.1 기본값(keep-alive)을 그대로 쓴다 -- 게이트웨이(HttpSession)가
+    # upstream 커넥션도 재사용하므로(doc/plan.md "keep-alive 도입" 참고),
+    # 이 서버가 매 응답 후 바로 닫아버리면 pool 재사용 경로를 테스트할 수
+    # 없다. keep-alive 없이 매번 새 연결을 강제하고 싶으면 HTTP/1.0으로
+    # 바꿔서 실행.
+    protocol_version = "HTTP/1.1"
 
     def do_GET(self):
         self.send_response(200)

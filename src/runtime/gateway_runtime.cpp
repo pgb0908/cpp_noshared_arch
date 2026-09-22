@@ -73,6 +73,8 @@ void GatewayRuntime::print_metrics_summary() const {
     uint64_t total_down_up_bytes = 0;
     uint64_t total_up_down_bytes = 0;
     uint64_t total_connect_errors = 0;
+    uint64_t total_requests = 0;
+    uint64_t total_upstream_retries = 0;
 
     std::cout << "\n--- shard metrics ---\n";
     for (const auto& shard : shards_) {
@@ -83,10 +85,13 @@ void GatewayRuntime::print_metrics_summary() const {
         const uint64_t down_up = m.bytes_downstream_to_upstream.load(std::memory_order_relaxed);
         const uint64_t up_down = m.bytes_upstream_to_downstream.load(std::memory_order_relaxed);
         const uint64_t connect_errors = m.upstream_connect_errors.load(std::memory_order_relaxed);
+        const uint64_t requests = m.requests_handled.load(std::memory_order_relaxed);
+        const uint64_t upstream_retries = m.upstream_retries.load(std::memory_order_relaxed);
 
         std::cout << "shard " << shard->index() << ": accepted=" << accepted << " active=" << active
-                   << " closed=" << closed << " down->up=" << down_up << "B up->down=" << up_down
-                   << "B connect_errors=" << connect_errors << "\n";
+                   << " closed=" << closed << " requests=" << requests << " down->up=" << down_up
+                   << "B up->down=" << up_down << "B connect_errors=" << connect_errors
+                   << " upstream_retries=" << upstream_retries << "\n";
 
         total_accepted += accepted;
         total_closed += closed;
@@ -94,9 +99,12 @@ void GatewayRuntime::print_metrics_summary() const {
         total_down_up_bytes += down_up;
         total_up_down_bytes += up_down;
         total_connect_errors += connect_errors;
+        total_requests += requests;
+        total_upstream_retries += upstream_retries;
     }
     std::cout << "total: accepted=" << total_accepted << " active=" << total_active
-               << " closed=" << total_closed << " down->up=" << total_down_up_bytes
-               << "B up->down=" << total_up_down_bytes << "B connect_errors=" << total_connect_errors
+               << " closed=" << total_closed << " requests=" << total_requests
+               << " down->up=" << total_down_up_bytes << "B up->down=" << total_up_down_bytes
+               << "B connect_errors=" << total_connect_errors << " upstream_retries=" << total_upstream_retries
                << "\n";
 }

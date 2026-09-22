@@ -22,6 +22,12 @@ public:
     bool has_error() const override { return has_error_; }
     const net::Error& error() const override { return error_; }
 
+    // LlhttpRequestParser의 should_keep_alive() 주석 참고 -- message_done()
+    // 전엔 라이브로, 후엔(flags가 리셋된 뒤) 콜백에서 캐시해둔 값으로.
+    bool should_keep_alive() const override {
+        return message_done_ ? should_keep_alive_ : (::llhttp_should_keep_alive(&parser_) != 0);
+    }
+
 private:
     static int on_message_begin(::llhttp_t* p);
     static int on_status(::llhttp_t* p, const char* at, std::size_t len);
@@ -51,6 +57,8 @@ private:
 
     bool has_error_ = false;
     net::Error error_;
+
+    bool should_keep_alive_ = false;
 };
 
 }  // namespace net::http::llhttp_backend

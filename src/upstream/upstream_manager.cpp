@@ -58,6 +58,10 @@ void UpstreamManager::acquire_connection(std::size_t index, net::SocketCallback 
     assert(event_loop_.is_current_thread() && "UpstreamManager touched from a non-owning thread");
 
     auto& pool = idle_pools_[index];
+    // TODO: 임시 디버그 로그 -- keep-alive/retry 도입 중 pool 재사용
+    // 여부를 실측 확인하려고 넣어둠. 나중에 제대로 된 로깅 체계(레벨
+    // 있는 로거 등)가 생기면 그걸로 교체.
+    std::cerr << "[debug] acquire_connection index=" << index << " pool_size=" << pool.size() << "\n";
     if (!pool.empty()) {
         auto socket = std::move(pool.back());
         pool.pop_back();
@@ -65,6 +69,15 @@ void UpstreamManager::acquire_connection(std::size_t index, net::SocketCallback 
         return;
     }
 
+    connect_fresh(index, std::move(callback));
+}
+
+void UpstreamManager::acquire_fresh_connection(std::size_t index, net::SocketCallback callback) {
+    assert(event_loop_.is_current_thread() && "UpstreamManager touched from a non-owning thread");
+    connect_fresh(index, std::move(callback));
+}
+
+void UpstreamManager::connect_fresh(std::size_t index, net::SocketCallback callback) {
     auto socket = event_loop_.create_socket();
     net::ISocket* raw = socket.get();
     const net::Endpoint target = endpoints_[index].resolved;
@@ -109,6 +122,7 @@ void UpstreamManager::release_connection(std::size_t index, std::unique_ptr<net:
     assert(event_loop_.is_current_thread() && "UpstreamManager touched from a non-owning thread");
 
     auto& pool = idle_pools_[index];
+    std::cerr << "[debug] release_connection index=" << index << " pool_size_before=" << pool.size() << "\n";
     if (pool.size() >= config_.connection_pool_max_idle_per_endpoint) {
         socket->close();
         return;

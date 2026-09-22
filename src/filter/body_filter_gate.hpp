@@ -45,6 +45,13 @@ public:
         return apply(std::move(chunk), end_stream, response_state_, /*is_request=*/false);
     }
 
+    // keep-alive로 같은 커넥션에서 다음 요청을 처리하기 전에 호출 --
+    // 방향별 버퍼링 상태(DataIterationState)를 새 메시지를 위해 비운다.
+    void reset() {
+        request_state_ = FilterChain::DataIterationState{};
+        response_state_ = FilterChain::DataIterationState{};
+    }
+
 private:
     Result apply(std::string chunk, bool end_stream, FilterChain::DataIterationState& state, bool is_request) {
         const FilterDataResult result = is_request ? chain_.apply_request_data(chunk, end_stream, state, ctx_)

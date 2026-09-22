@@ -3,6 +3,7 @@
 #include <cassert>
 
 #include "net/http/llhttp/factory.hpp"
+#include "net/http/native/detail.hpp"
 #include "net/http/native/factory.hpp"
 
 void HttpSession::start() {
@@ -11,6 +12,38 @@ void HttpSession::start() {
     write_buf_ = buffer_pool_.acquire();
     request_parser_ = net::http::llhttp_backend::create_request_parser();
     request_serializer_ = net::http::native::create_request_serializer();
+    read_request_chunk();
+}
+
+// keep-alive로 같은 downstream 소켓에서 다음 요청을 받기 전에 요청별
+// 상태를 전부 새로 만든다. read_buf_/write_buf_(BufferPool에서 빌린
+// 버퍼)는 커넥션과 함께 재사용 -- 매 요청마다 반납/재획득할 이유가 없다.
+void HttpSession::reset_for_next_request() {
+    request_parser_ = net::http::llhttp_backend::create_request_parser();
+    request_serializer_ = net::http::native::create_request_serializer();
+    request_filtered_ = false;
+    request_serializer_started_ = false;
+    request_final_body_provided_ = false;
+    upstream_connecting_ = false;
+    upstream_wrote_once_ = false;
+    upstream_retry_used_ = false;
+    upstream_whole_request_captured_ = false;
+    upstream_whole_request_snapshot_.clear();
+    upstream_response_read_any_ = false;
+
+    response_parser_.reset();
+    response_serializer_.reset();
+    response_filtered_ = false;
+    response_serializer_started_ = false;
+    response_final_body_provided_ = false;
+    direct_response_mode_ = false;
+
+    downstream_wants_keep_alive_ = false;
+    downstream_keep_alive_effective_ = false;
+
+    filter_ctx_ = FilterContext{};
+    body_filter_gate_.reset();
+
     read_request_chunk();
 }
 
@@ -40,12 +73,27 @@ void HttpSession::process_downstream_chunk(net::ConstBuffer raw) {
 
         if (!request_filtered_ && request_parser_->header_done()) {
             request_filtered_ = true;
+            // 실제로 요청 헤더가 파싱된 시점에만 카운트 -- start()/
+            // reset_for_next_request()에서 미리 세면, keep-alive 커넥션이
+            // 다음 요청 없이 그냥 닫히는 경우까지 "요청"으로 잘못 잡힌다.
+            metrics_.requests_handled.fetch_add(1, std::memory_order_relaxed);
+            // 클라이언트가 keep-alive를 원했는지는 요청 자체(버전 +
+            // Connection 헤더)만으로 결정되고, 이후 응답 프레이밍과
+            // 무관하게 고정된다 -- 최종 판단(downstream_keep_alive_effective_)은
+            // 응답 헤더가 파싱된 뒤 process_upstream_chunk()에서 확정.
+            downstream_wants_keep_alive_ = request_parser_->should_keep_alive();
             net::http::RequestHead head = request_parser_->head();
             const FilterHeaderResult result = filter_chain_.apply_request(head, filter_ctx_);
             if (result.action == FilterHeaderAction::kRespondDirectly) {
                 respond_directly(result.direct_response.head, result.direct_response.body);
                 return;
             }
+            // upstream과의 Connection은 downstream/upstream hop을
+            // 독립적으로 판단하는 설계(doc/plan.md "keep-alive 도입"
+            // 참고)에 따라 클라이언트가 뭘 보냈든 항상 keep-alive를
+            // 요청한다 -- 그래야 UpstreamManager pool 재사용이 가능해짐.
+            // 실제로 재사용 가능한지는 응답의 should_keep_alive()로 다시 확인.
+            net::http::set_header(head.headers, "Connection", "keep-alive");
             request_serializer_->start(head);
             request_serializer_started_ = true;
         }
@@ -172,16 +220,102 @@ void HttpSession::pull_and_write_request_to_upstream() {
         return;
     }
 
+    // 이번 write 한 번으로 요청 전체(헤더+바디)가 다 나간다면 -- 바디
+    // 없는 요청 등, 실무에서 흔한 케이스 -- 나중에 읽기 실패로 재시도가
+    // 필요해질 경우를 위해 그대로 스냅샷해둔다 (upstream_whole_request_captured_
+    // 주석 참고). 스트리밍 중인 큰 바디는 여기 안 걸려서 스냅샷을 안 남김.
+    if (!upstream_wrote_once_ && request_serializer_->done()) {
+        upstream_whole_request_snapshot_.assign(write_buf_->data(), n);
+        upstream_whole_request_captured_ = true;
+    }
+
     auto self = shared_from_this();
-    upstream_->async_write(net::ConstBuffer{write_buf_->data(), n}, [this, self](const net::Error& err, std::size_t written) {
+    upstream_->async_write(net::ConstBuffer{write_buf_->data(), n}, [this, self, n](const net::Error& err, std::size_t written) {
         assert_on_owning_thread();
         if (!err.ok()) {
+            // pool에서 꺼낸 커넥션이 이미 peer에 의해 끊겨 있었을 수
+            // 있음(Phase 3에서 알려진 갭) -- 이 커넥션으로 아직 한
+            // 바이트도 성공적으로 못 보냈고, 재시도를 아직 안 썼다면
+            // fresh connect로 딱 1회 재시도. 이미 일부라도 보낸 적
+            // 있으면 재시도는 안전하지 않음(중복 전송) -- 그냥 종료.
+            if (!upstream_wrote_once_ && !upstream_retry_used_) {
+                upstream_retry_used_ = true;
+                retry_upstream_write_once(n);
+                return;
+            }
             close();
             return;
         }
+        upstream_wrote_once_ = true;
         metrics_.bytes_downstream_to_upstream.fetch_add(written, std::memory_order_relaxed);
         pull_and_write_request_to_upstream();
     });
+}
+
+void HttpSession::retry_upstream_write_once(std::size_t n) {
+    metrics_.upstream_retries.fetch_add(1, std::memory_order_relaxed);
+    if (upstream_) {
+        upstream_->close();  // pool에 반납하지 않고 그냥 버림 -- 죽어있던 소켓
+    }
+    upstream_.reset();
+    auto self = shared_from_this();
+    upstream_manager_.acquire_fresh_connection(
+        endpoint_index_, [this, self, n](const net::Error& err, std::unique_ptr<net::ISocket> socket) {
+            assert_on_owning_thread();
+            if (!err.ok() || !socket) {
+                metrics_.upstream_connect_errors.fetch_add(1, std::memory_order_relaxed);
+                close();
+                return;
+            }
+            upstream_ = std::move(socket);
+            // write_buf_[0, n)은 실패한 첫 시도와 정확히 같은 바이트다
+            // (serializer의 pull()은 실패 여부와 무관하게 내부 offset을
+            // 이미 그만큼 전진시켜 놨으므로, 시리얼라이저를 다시 건드리지
+            // 않고 이 버퍼 그대로 재전송하면 된다).
+            auto retry_self = shared_from_this();
+            upstream_->async_write(net::ConstBuffer{write_buf_->data(), n},
+                                    [this, retry_self](const net::Error& write_err, std::size_t written) {
+                                        assert_on_owning_thread();
+                                        if (!write_err.ok()) {
+                                            close();
+                                            return;
+                                        }
+                                        upstream_wrote_once_ = true;
+                                        metrics_.bytes_downstream_to_upstream.fetch_add(written, std::memory_order_relaxed);
+                                        pull_and_write_request_to_upstream();
+                                    });
+        });
+}
+
+void HttpSession::retry_upstream_after_read_failure() {
+    metrics_.upstream_retries.fetch_add(1, std::memory_order_relaxed);
+    if (upstream_) {
+        upstream_->close();  // pool에 반납하지 않고 그냥 버림 -- 죽어있던 소켓
+    }
+    upstream_.reset();
+    auto self = shared_from_this();
+    upstream_manager_.acquire_fresh_connection(
+        endpoint_index_, [this, self](const net::Error& err, std::unique_ptr<net::ISocket> socket) {
+            assert_on_owning_thread();
+            if (!err.ok() || !socket) {
+                metrics_.upstream_connect_errors.fetch_add(1, std::memory_order_relaxed);
+                close();
+                return;
+            }
+            upstream_ = std::move(socket);
+            auto retry_self = shared_from_this();
+            upstream_->async_write(
+                net::ConstBuffer{upstream_whole_request_snapshot_.data(), upstream_whole_request_snapshot_.size()},
+                [this, retry_self](const net::Error& write_err, std::size_t written) {
+                    assert_on_owning_thread();
+                    if (!write_err.ok()) {
+                        close();
+                        return;
+                    }
+                    metrics_.bytes_downstream_to_upstream.fetch_add(written, std::memory_order_relaxed);
+                    start_response_phase();  // 파서/시리얼라이저를 새로 만들고 다시 read
+                });
+        });
 }
 
 // ---------- 2단계: upstream 응답 파싱 -> 필터 -> downstream 전송 ----------
@@ -198,9 +332,19 @@ void HttpSession::read_response_chunk() {
         net::MutableBuffer{read_buf_->data(), read_buf_->size()}, [this, self](const net::Error& err, std::size_t n) {
             assert_on_owning_thread();
             if (!err.ok()) {
+                // 응답을 한 바이트도 못 받은 채 첫 read가 실패 -- 죽어있는
+                // pooled 커넥션의 실제 실패 양상(위 upstream_whole_request_captured_
+                // 주석 참고). 요청 전체를 스냅샷해뒀고 재시도를 아직 안
+                // 썼다면 fresh connect로 1회 재시도.
+                if (!upstream_response_read_any_ && upstream_whole_request_captured_ && !upstream_retry_used_) {
+                    upstream_retry_used_ = true;
+                    retry_upstream_after_read_failure();
+                    return;
+                }
                 close();
                 return;
             }
+            upstream_response_read_any_ = true;
             process_upstream_chunk(net::ConstBuffer{read_buf_->data(), n});
         });
 }
@@ -218,6 +362,16 @@ void HttpSession::process_upstream_chunk(net::ConstBuffer raw) {
                 respond_directly(result.direct_response.head, result.direct_response.body);
                 return;
             }
+            // downstream keep-alive 최종 판단: 클라이언트가 원했는지
+            // (downstream_wants_keep_alive_) + 이 응답이 명확한 프레이밍
+            // (Content-Length 또는 chunked)을 가졌는지. 프레이밍이
+            // 불명확한(close-delimited) 응답에서 keep-alive라고 하면
+            // 클라이언트가 다음 요청을 언제 보내도 되는지 알 방법이
+            // 없어져 거짓 약속이 된다.
+            const bool response_framed =
+                net::http::has_header(head.headers, "Content-Length") || net::http::native::detail::has_chunked_encoding(head.headers);
+            downstream_keep_alive_effective_ = downstream_wants_keep_alive_ && response_framed;
+            net::http::set_header(head.headers, "Connection", downstream_keep_alive_effective_ ? "keep-alive" : "close");
             response_serializer_->start(head);
             response_serializer_started_ = true;
         }
@@ -300,7 +454,21 @@ void HttpSession::pull_and_write_response_to_downstream() {
     const std::size_t n = response_serializer_->pull(net::MutableBuffer{write_buf_->data(), write_buf_->size()});
     if (n == 0) {
         if (response_serializer_->done()) {
-            close();  // 요청 1회 + 응답 1회 완료 -- keep-alive 없이 정상 종료
+            // upstream 재사용 여부는 downstream keep-alive와 독립적으로
+            // 판단(hop-by-hop decouple, doc/plan.md "keep-alive 도입"
+            // 참고) -- 클라이언트가 이 커넥션을 끊으려 해도, 응답 자체가
+            // keep-alive 가능했다면 upstream 커넥션은 다음 세션을 위해
+            // pool에 반납한다. direct_response_mode_(필터 거부/에러
+            // 합성 응답)일 땐 response_parser_가 진짜 upstream 응답을
+            // 대표하지 않으므로(혹은 아예 null이므로) 절대 반납하지 않음.
+            if (!direct_response_mode_ && response_parser_ && response_parser_->should_keep_alive() && upstream_) {
+                upstream_manager_.release_connection(endpoint_index_, std::move(upstream_));
+            }
+            if (!direct_response_mode_ && downstream_keep_alive_effective_) {
+                reset_for_next_request();  // 같은 downstream 소켓에서 다음 요청 대기
+            } else {
+                close();
+            }
         } else if (!direct_response_mode_ && response_parser_ && !response_parser_->message_done()) {
             read_response_chunk();
         } else {
@@ -343,6 +511,8 @@ void HttpSession::close() {
         return;
     }
     closing_ = true;
+    std::cerr << "[debug] close() called, upstream_wrote_once=" << upstream_wrote_once_
+              << " upstream_retry_used=" << upstream_retry_used_ << " has_upstream=" << (bool)upstream_ << "\n";
 
     downstream_->shutdown();
     downstream_->close();

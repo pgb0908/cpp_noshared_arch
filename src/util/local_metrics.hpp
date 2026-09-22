@@ -18,6 +18,11 @@ struct alignas(64) LocalMetrics {
     std::atomic<uint64_t> bytes_downstream_to_upstream{0};
     std::atomic<uint64_t> bytes_upstream_to_downstream{0};
     std::atomic<uint64_t> upstream_connect_errors{0};
+    // keep-alive 도입 이후 connections_accepted와 갈라짐: 커넥션 1개가
+    // 여러 요청을 처리할 수 있어서, 이 값/connections_accepted 비율로
+    // 커넥션 재사용률을 관찰할 수 있다.
+    std::atomic<uint64_t> requests_handled{0};
+    std::atomic<uint64_t> upstream_retries{0};
 
     void on_accept() noexcept {
         connections_accepted.fetch_add(1, std::memory_order_relaxed);

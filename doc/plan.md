@@ -2,7 +2,7 @@
 
 `doc/per-core-sharded-architecture.md`의 Phase 1~7 전략과, 이번 대화에서 나온 실무적 이슈(DNS 재조회, connect timeout 등)를 결합해 앞으로의 작업을 정리한다. 각 Phase는 이전 Phase가 끝나야만 시작 가능한 건 아니고, 문서 자체도 "단계별 리팩토링 전략"이라고 명시했듯 **점진적** 진행을 전제로 한다.
 
-### 한눈에 보는 현재 상태 (2026-09-21 기준)
+### 한눈에 보는 현재 상태 (2026-09-22 기준)
 
 | 항목 | 상태 |
 |---|---|
@@ -15,9 +15,11 @@
 | HTTP 파싱/직렬화 엔진 (llhttp + 자체 시리얼라이저) | ✅ 완료 |
 | HTTP 엔진을 실제 relay에 연결 (`HttpSession`) | ✅ 완료 — `Session`(raw relay)을 완전히 대체 |
 | **필터 체인 (Policy/Filter)** | ✅ **완료** — 헤더 대칭 인터페이스(`IFilter`) + onion 순서, 바디 필터(스트리밍/버퍼링, watermark) 추가, upstream 연결 전에 거부 가능함을 실측 확인 |
-| GTest 전체 | 50개, 전부 통과 |
+| **Phase 6 baseline 프로파일링** | ✅ **완료** — wrk + perf + FlameGraph, kptr_restrict 해제 후 재측정까지 (`doc/benchmark-report.md`) |
+| **keep-alive (downstream + upstream)** | ✅ **완료** — hop 독립 판단, upstream pool 실사용, stale pooled connection retry-once. 아래 상세 |
+| GTest 전체 | 63개, 전부 통과 |
 | Phase 5 (CPU Affinity 고도화) | 미착수 |
-| Phase 6 (프로파일링 기반 Hot Path 최적화) | 미착수 |
+| Phase 6 (프로파일링 기반 Hot Path 최적화, baseline 이후 개선) | 미착수 |
 | Phase 7 (SO_REUSEPORT) | 미착수 |
 | 라우팅/정책/RuntimeConfigManager/TLS | 미착수 |
 
@@ -289,15 +291,50 @@ GTest 63개 전부 통과 + 실제 upstream GET/POST e2e 재확인.
 
 ---
 
+## Phase 6 baseline 프로파일링 ✅ 완료
+
+`wrk` 부하 + `perf record`/FlameGraph로 첫 실측(`doc/benchmark-report.md` 참고). `kernel.kptr_restrict=0`으로 낮춰 커널 스택까지 전부 심볼 해석한 뒤 재측정까지 완료. 결론: 뮤텍스 경합은 두 차례 측정 모두 미미(1~2%대)했고, `accept`(downstream, 40% 누적)/`epoll_wait`+`epoll_ctl`(36%) 같은 **"커넥션당 1회 발생하는 커널 objects 할당/syscall 비용"**이 지배적 — keep-alive 부재(매 요청마다 새 accept+connect)가 직접 원인으로 지목됨. `bpftrace`는 락 경합이 이미 낮게 나와서 한계효용이 낮다고 판단해 보류. 이 결과가 바로 아래 keep-alive 작업의 착수 근거가 됨.
+
+---
+
+## keep-alive (downstream + upstream) ✅ 완료
+
+**계기**: Phase 6 baseline 프로파일링에서 accept/connect(요청당 1회 발생하는 커널 비용)가 최대 병목으로 확인됨 — `doc/benchmark-report.md` §9. 도입 전 grill-me로 확인한 결정 사항:
+- downstream(클라이언트-게이트웨이) + upstream(게이트웨이-백엔드) **둘 다** 도입 (upstream만/downstream만이 아니라)
+- 두 hop을 **독립적으로 판단**(hop-by-hop decouple, 표준 프록시 패턴) — upstream이 응답에서 close를 요구해도 downstream은 계속 keep-alive 가능(다음 요청은 새 upstream 커넥션으로), 그 반대도 마찬가지
+- 죽어있는 pooled 커넥션에 대해 **retry-once** (fresh connect로 딱 1회 재시도)
+
+**핵심 구현**:
+- `net::http::IRequestParser`/`IResponseParser`에 `should_keep_alive()` 추가 (llhttp `llhttp_should_keep_alive()` 위임). **실측 중 llhttp 자체의 함정을 발견**: llhttp는 `on_message_complete` 콜백 직후(`llhttp__after_message_complete`) `parser->flags`를 0으로 리셋해버려서, 메시지가 끝난 뒤(우리가 pool 반납 여부를 판단하는 시점)에 이 함수를 호출하면 Connection/Content-Length 관련 플래그가 전부 지워진 상태라 keep-alive 응답인데도 항상 `false`가 나옴. `on_message_complete` 콜백 "안"(flags가 아직 유효한 마지막 시점)에서 값을 캐시해두고, `message_done()` 전엔 라이브로/후엔 캐시로 분기하도록 수정 (`src/net/http/llhttp/{request,response}_parser.{hpp,cpp}`)
+- `net::http::set_header()`/`has_header()`(`src/net/http/types.hpp`)로 Connection 헤더를 hop마다 독립적으로 덮어씀 -- 클라이언트/upstream이 뭘 보냈든 게이트웨이가 직접 결정
+- downstream keep-alive 최종 판단은 "클라이언트가 원했는지" + "**응답이 명확한 프레이밍(Content-Length/chunked)을 가졌는지**"를 곱한 값(`downstream_keep_alive_effective_`) -- close-delimited 응답에서 keep-alive라고 하면 클라이언트에 거짓 약속이 됨
+- `HttpSession::reset_for_next_request()`: keep-alive 사이클마다 파서/시리얼라이저를 새로 만들고(reset() 메서드를 따로 안 만들고 기존 factory 재호출 패턴 재사용) `BodyFilterGate::reset()`/`FilterContext` 재생성까지 포함해 요청별 상태를 전부 새로 만듦
+- `UpstreamManager::acquire_fresh_connection()` 신설 (pool을 안 보고 항상 fresh connect) -- retry 전용
+- **retry-once의 실제 실패 지점이 예상과 달랐음** (SIGKILL로 직접 재현해서 발견): 죽어있는 pooled 커넥션에 대한 첫 **write는 로컬 send buffer에 조용히 성공**하고(에러 없음), 그 직후 응답을 기다리는 **첫 read에서 즉시 실패**로 드러남. 처음엔 write 실패만 재시도 대상으로 짰다가 이 실측으로 재시도가 전혀 안 걸리는 걸 발견 -- `read_response_chunk()`의 첫 read 실패(응답 바이트 0개 상태)도 재시도 대상에 포함하도록 확장. 이 시점엔 이미 시리얼라이저가 다 드레인돼서 요청을 재구성할 수 없으므로, **요청 전체가 write 1번으로 끝난 경우**(바디 없음 등 흔한 케이스)에 한해 그 바이트를 스냅샷(`upstream_whole_request_snapshot_`)해뒀다가 재전송. 스트리밍 중인 큰 바디는 스냅샷 없이(메모리 무제한 증가 방지) 재시도 스킵
+- `LocalMetrics::requests_handled`/`upstream_retries` 추가 (기존 `connections_accepted`와 분리 -- 커넥션 1개가 여러 요청을 처리하므로 재사용률 관찰 가능). `requests_handled`는 **요청 헤더가 실제로 파싱된 시점**에만 증가시켜야 함 -- 처음엔 `start()`/`reset_for_next_request()`에서 미리 셌다가, keep-alive 커넥션이 다음 요청 없이 그냥 끊기는 경우까지 요청으로 잘못 잡히는 버그가 있었음(실측 중 발견 후 이동)
+- 임시 디버그 로그(`std::cerr << "[debug] ..."`, `acquire_connection`/`release_connection`/`close()` 세 곳)를 의도적으로 남겨둠 -- 사용자 요청으로, 나중에 제대로 된 로깅 체계로 교체 예정
+
+**검증**: GTest 63개 전부 통과. curl/python으로 (1) 같은 다운스트림 커넥션에서 여러 요청 처리(`Connection: keep-alive` 응답 헤더 확인) (2) 클라이언트가 `Connection: close`를 명시하면 정상 종료 (3) 4 shard 동시 다중 요청 (4) **SIGKILL로 pooled 커넥션을 실제로 죽인 뒤 retry-once가 정확히 1회 발동(`upstream_retries` 메트릭)하고 클라이언트가 정상 200을 받는 것까지 직접 재현 확인**.
+
+`tools/bench_upstream.py`를 HTTP/1.0(강제 close) → HTTP/1.1(keep-alive 기본값)로 변경 -- upstream keep-alive 경로를 테스트하려면 필요.
+
+**아직 안 한 것**:
+- Connection idle timeout(다운스트림이 다음 요청을 영원히 안 보내는 경우) / upstream pool 커넥션의 idle timeout -- 여전히 미착수 (retry-once가 "이미 죽은 커넥션"은 잡아주지만, "살아있지만 응답을 마냥 기다리는" 상황은 못 막음)
+- 파이프라이닝은 여전히 미지원 (요청 처리 도중 도착한 다음 요청의 leftover 바이트는 버려짐) -- 순차 keep-alive만 지원
+- HEAD 요청에 대한 응답 파싱 특수 처리 없음 (llhttp에 `llhttp_finish`/skip-body 힌트를 안 줌) -- keep-alive와 무관하게 이미 있던 pre-existing 갭, 이번에 코드 읽다가 확인됨
+
+---
+
 ## 다음 세션 시작 시 체크할 것
 
-HTTP 엔진 연동 + 필터 체인까지 끝나서, 이제 실제로 동작하는 (아주 기초적인) API Gateway가 됐다. 다음 후보들:
+HTTP 엔진 연동 + 필터 체인 + keep-alive까지 끝나서, 실제로 쓸만한 API Gateway에 가까워졌다. 다음 후보들:
 
 - **실제 정책 필터 추가** — 지금은 예시(Via 헤더)뿐. 인증(JWT 검증 등), rate limiting, CORS 같은 실제 필터를 `src/filter/`에 추가. `IRequestFilter`/`IResponseFilter` 인터페이스는 이미 있으니 새 필터 클래스 + `build_default_filter_chain()`에 등록만 하면 됨
 - **라우팅 (RouteSnapshot)** — 지금은 upstream 1개(혹은 여러 개 round-robin)로만 보내고 Host/Path 기반 분기가 없음. 필터 체인과 결합하면 "이 경로엔 이 필터만" 같은 라우트별 정책도 가능해짐
 - **connect 실패 시 502 응답** — 지금 `HttpSession::connect_upstream()`이 실패하면 그냥 downstream을 close해버림 (정상적인 HTTP 에러 응답 없음). `respond_directly()`를 이미 필터 short-circuit용으로 만들어뒀으니, 같은 메커니즘을 connect 실패 시에도 재사용해서 502 Bad Gateway를 돌려주는 게 자연스러운 다음 스텝
-- **`HttpSession` 자체의 GTest 커버리지** — 지금은 실측 curl 테스트로만 검증됨. Fake 소켓 + 실제 llhttp 파서를 엮은 통합 테스트를 추가하면 회귀 방지에 도움
-- **keep-alive 도입 여부 재검토** — 지금은 요청/응답 1회 후 무조건 close. 매 요청마다 TCP 3-way handshake + upstream connect를 새로 하는 비용이 실측으로 문제가 되면 검토 (`UpstreamManager` pool과 keep-alive 검증 문제가 그때 다시 등장함)
-- **Phase 5/6/7** (CPU Affinity 고도화 / 프로파일링 기반 최적화 / SO_REUSEPORT) — 지금까지는 기능 구현 위주였고 실측 성능 검증(TPS, latency, 실제 CPU/cache 지표)은 아직 한 번도 안 함. HTTP 프록시가 이제 실제로 동작하니, 부하 테스트 도구(wrk/ab 등)로 처음 실측해볼 시점이기도 함
+- **Connection idle timeout** — keep-alive 도입으로 새로 생긴 리스크: 다운스트림이 커넥션만 열어두고 다음 요청을 영원히 안 보내면 세션이 계속 살아있음. downstream/upstream pool 양쪽 다 아직 없음
+- **`HttpSession` 자체의 GTest 커버리지** — 지금은 실측 curl/python 테스트로만 검증됨. Fake 소켓 + 실제 llhttp 파서를 엮은 통합 테스트를 추가하면 keep-alive/retry 로직 회귀 방지에 특히 도움
+- **디버그 로그를 제대로 된 로깅 체계로 교체** — keep-alive/retry 도입 중 임시로 넣어둔 `std::cerr << "[debug] ..."` 3곳(`UpstreamManager::acquire_connection/release_connection`, `HttpSession::close()`)을 레벨 있는 로거로 교체
+- **Phase 5/7** (CPU Affinity 고도화 / SO_REUSEPORT) — Phase 6 baseline은 나왔으니, keep-alive 도입 효과를 재측정(§9 대비 accept/connect 비중이 실제로 줄었는지)한 뒤에 진행하는 게 순서에 맞음
 
 진행할 방향은 grill-me 스타일로 결정 트리를 다시 확인한 뒤 착수할 것 (이 세션 전체에서 일관되게 써온 패턴).

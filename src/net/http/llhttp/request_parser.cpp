@@ -109,7 +109,11 @@ int LlhttpRequestParser::on_body(::llhttp_t* p, const char* at, std::size_t len)
 }
 
 int LlhttpRequestParser::on_message_complete(::llhttp_t* p) {
-    self(p).message_done_ = true;
+    auto& s = self(p);
+    // parser_.flags가 아직 유효한 마지막 시점 -- request_parser.hpp의
+    // should_keep_alive_ 주석 참고.
+    s.should_keep_alive_ = ::llhttp_should_keep_alive(p) != 0;
+    s.message_done_ = true;
     return HPE_OK;
 }
 

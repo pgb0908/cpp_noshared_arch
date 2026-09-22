@@ -34,6 +34,13 @@ public:
     // 처리해야 한다. 실패 시 콜백에 전달되는 소켓 포인터는 null.
     void acquire_connection(std::size_t index, net::SocketCallback callback);
 
+    // acquire_connection()과 동일하지만 pool을 절대 보지 않고 항상 새로
+    // connect한다. HttpSession이 keep-alive 재사용 커넥션의 첫 write가
+    // 실패했을 때("풀의 idle 커넥션이 조용히 끊겨 있었다") 1회 재시도
+    // 경로로 쓴다 -- 그 재시도가 또 죽어있는 pool 커넥션을 집으면
+    // 의미가 없으므로 반드시 fresh connect여야 한다.
+    void acquire_fresh_connection(std::size_t index, net::SocketCallback callback);
+
     // 아직 정상인 소켓을 idle pool에 반납한다 (상한:
     // connection_pool_max_idle_per_endpoint). 이 endpoint의 풀이 이미
     // 가득 찼으면 그냥 소켓을 닫고 버린다.
@@ -48,6 +55,7 @@ private:
 
     void resolve_all();
     void schedule_refresh();
+    void connect_fresh(std::size_t index, net::SocketCallback callback);
 
     net::IEventLoop& event_loop_;
     const Config& config_;

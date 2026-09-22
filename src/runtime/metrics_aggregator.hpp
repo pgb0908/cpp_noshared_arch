@@ -42,6 +42,8 @@ private:
         uint64_t down_up_bytes = 0;
         uint64_t up_down_bytes = 0;
         uint64_t connect_errors = 0;
+        uint64_t requests = 0;
+        uint64_t upstream_retries = 0;
     };
 
     Totals aggregate() const {
@@ -54,6 +56,8 @@ private:
             t.down_up_bytes += m.bytes_downstream_to_upstream.load(std::memory_order_relaxed);
             t.up_down_bytes += m.bytes_upstream_to_downstream.load(std::memory_order_relaxed);
             t.connect_errors += m.upstream_connect_errors.load(std::memory_order_relaxed);
+            t.requests += m.requests_handled.load(std::memory_order_relaxed);
+            t.upstream_retries += m.upstream_retries.load(std::memory_order_relaxed);
         }
         return t;
     }
@@ -63,8 +67,9 @@ private:
         // 실시간 모니터링용 출력이라, 파일/파이프로 리다이렉트돼도 바로
         // 보이도록 매번 flush한다 (std::endl).
         std::cout << "[metrics] accepted=" << t.accepted << " active=" << t.active << " closed=" << t.closed
-                   << " down->up=" << t.down_up_bytes << "B up->down=" << t.up_down_bytes
-                   << "B connect_errors=" << t.connect_errors << std::endl;
+                   << " requests=" << t.requests << " down->up=" << t.down_up_bytes
+                   << "B up->down=" << t.up_down_bytes << "B connect_errors=" << t.connect_errors
+                   << " upstream_retries=" << t.upstream_retries << std::endl;
     }
 
     void schedule() {

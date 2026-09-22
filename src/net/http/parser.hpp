@@ -42,6 +42,11 @@ public:
     virtual bool message_done() const = 0;
     virtual bool has_error() const = 0;
     virtual const Error& error() const = 0;
+
+    // header_done() 이후에만 유효. 파싱된 버전 + Connection 헤더(그리고
+    // upgrade 여부 등)로부터 이 메시지가 keep-alive 가능한지 판단 --
+    // llhttp_should_keep_alive()에 위임 (net/http/llhttp/request_parser.cpp).
+    virtual bool should_keep_alive() const = 0;
 };
 
 class IResponseParser {
@@ -58,6 +63,8 @@ public:
     virtual bool message_done() const = 0;
     virtual bool has_error() const = 0;
     virtual const Error& error() const = 0;
+
+    virtual bool should_keep_alive() const = 0;
 };
 
 }  // namespace net::http

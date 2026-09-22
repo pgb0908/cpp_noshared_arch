@@ -26,6 +26,19 @@ public:
     bool has_error() const override { return has_error_; }
     const net::Error& error() const override { return error_; }
 
+    // llhttp는 on_message_complete 콜백 직후(내부 after_message_complete
+    // 단계) parser_.flags를 0으로 리셋해버린다. header_done() 직후처럼
+    // 메시지가 아직 안 끝난 시점엔 flags가 살아있으니 바로
+    // llhttp_should_keep_alive()를 호출해도 되지만, message_done() 이후
+    // (relay를 다 끝내고 나서 pool 반납 여부를 판단하는 시점 등)엔 flags가
+    // 이미 지워져 있어서 항상 false가 나온다 (실측 중 발견: keep-alive
+    // 응답인데도 계속 0을 반환하는 버그). 그래서 on_message_complete 콜백
+    // "안"(flags가 아직 살아있는 마지막 시점)에서 캐시해둔 값을, 메시지가
+    // 끝난 뒤에는 그 캐시로, 끝나기 전에는 라이브로 계산해 반환한다.
+    bool should_keep_alive() const override {
+        return message_done_ ? should_keep_alive_ : (::llhttp_should_keep_alive(&parser_) != 0);
+    }
+
 private:
     // llhttp 콜백들 (전부 static, parser->data에 담긴 this로 디스패치).
     static int on_message_begin(::llhttp_t* p);
@@ -66,6 +79,8 @@ private:
 
     bool has_error_ = false;
     net::Error error_;
+
+    bool should_keep_alive_ = false;
 };
 
 }  // namespace net::http::llhttp_backend
