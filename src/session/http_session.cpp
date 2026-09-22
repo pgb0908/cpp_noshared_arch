@@ -511,8 +511,10 @@ void HttpSession::close() {
         return;
     }
     closing_ = true;
-    std::cerr << "[debug] close() called, upstream_wrote_once=" << upstream_wrote_once_
-              << " upstream_retry_used=" << upstream_retry_used_ << " has_upstream=" << (bool)upstream_ << "\n";
+    // BENCH-TEMP: 프로파일링 중 임시로 꺼둠 (핫 패스 동기 stderr 쓰기가
+    // 측정을 왜곡함) -- 측정 끝나면 원복.
+    // std::cerr << "[debug] close() called, upstream_wrote_once=" << upstream_wrote_once_
+    //           << " upstream_retry_used=" << upstream_retry_used_ << " has_upstream=" << (bool)upstream_ << "\n";
 
     downstream_->shutdown();
     downstream_->close();
