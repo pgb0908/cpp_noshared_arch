@@ -236,3 +236,67 @@ perf script -i /tmp/perf.data > /tmp/out.perf
 로직이나 락 경합이 아니라 "커넥션당 1회 발생하는 커널 객체 할당/syscall 비용"**이다.
 `doc/plan.md`의 "다음 세션 체크리스트" 중 **keep-alive 도입 검토**가 다음으로 착수할
 가장 근거가 뚜렷한 항목.
+
+---
+
+## 10. keep-alive 도입 후 재측정 (2026-09-22)
+
+§9의 결론에 따라 keep-alive(downstream + upstream)를 구현한 뒤 동일한 wrk 프로파일
+(`-t4 -c64 -d10s --latency`)로 재측정.
+
+인터랙티브 리포트(FlameGraph 포함): https://claude.ai/artifact/AgkkvMigp1fxLs7RmiWkwe
+
+### 회귀 발견 → 원인 추적 → 수정
+
+keep-alive를 켜고 처음 측정했을 때 **p50/p75/p90이 41~42ms에 고정적으로 뭉치는**
+회귀가 나왔다 (§9 baseline의 p50 774µs보다 오히려 느려짐). 이 "특정 값 근처에
+좁게 뭉침" 패턴은 **Nagle 알고리즘 + 수신측 delayed ACK**의 전형적인 상호작용
+시그니처(Linux 기본 delayed ACK 타임아웃이 딱 40ms)다.
+
+- 이전(§6~§9)엔 요청마다 커넥션을 매번 새로 만들고 응답 직후 바로 `close()`했는데,
+  이 `close()`가 Nagle이 미뤄둔 마지막 작은 write를 **강제로 flush**해줘서 지연이
+  드러나지 않았던 것으로 추정됨 -- keep-alive로 연결이 계속 열려있게 되자 그 지연이
+  매 요청마다 그대로 노출됨
+- 1차 시도: 게이트웨이 소켓(`net/boost/socket.cpp`)에 `TCP_NODELAY` 추가 (accept된
+  downstream, connect된 upstream 둘 다) -- 재측정해도 41ms 그대로, 원인이 게이트웨이
+  쪽이 아님을 확인
+- 진짜 원인: **`tools/bench_upstream.py`(Python `http.server`) 쪽**. `send_header()`를
+  여러 번 호출해 헤더/바디가 서로 다른 작은 write로 나가는데, Python의
+  `http.server`는 기본적으로 `TCP_NODELAY`를 안 켠다. `Handler.setup()`에서
+  `socket.setsockopt(IPPROTO_TCP, TCP_NODELAY, 1)`을 추가해 해결
+
+### 결과 비교
+
+| 지표 | §9 baseline (keep-alive 전) | keep-alive + NODELAY 후 |
+|---|---|---|
+| Requests/sec | 3,036.84 *(이 세션 환경)* / 14,783 *(§6, 다른 환경)* | 25,704 |
+| p50 latency | 4.22 ms / 774 µs | 2.47 ms |
+| p90 latency | 767.77 ms / 810 ms | 8.65 ms |
+| p99 latency | 1.18 s / 1.17 s | 994 ms |
+| 커넥션 사용 패턴 | 요청마다 accept+connect | 커넥션당 평균 ~3,935 요청 재사용 |
+| upstream_retries / connect_errors | - | 0 / 0 |
+
+§6과 §9는 서로 다른 실행 환경(다른 세션)에서 측정된 값이라 절대치 비교는 참고용 --
+그래도 p90/p99가 §6·§9 둘 다에서 수백 ms대였다가 이번엔 p90이 8.65ms까지 내려온 건
+"매 요청 accept/connect가 만드는 롱테일"이 실제로 사라졌다는 뚜렷한 신호.
+`UpstreamManager` pool 재사용도 511,610 요청을 130개 커넥션으로 처리(커넥션당
+~3,935회 재사용)하며 실패 0건으로 확인.
+
+### perf 결과 해석 시 주의
+
+이번 측정에선 `update_sd_pick_busiest`(CFS 스케줄러 로드밸런싱)가 self-time
+47.71%로 1위였는데, 이는 애플리케이션 문제가 아니라 **이 세션이 돌아가는 샌드박스
+환경 자체의 CPU 스케줄링/가상화 특성**으로 보인다 -- 같은 wrk 파라미터로 돌린
+이전 두 측정에서도 처리량이 14,783 → 3,036 → 25,704 req/s로 실행마다 크게
+흔들렸다. 유저공간 지표(`pthread_mutex_lock` ~1%, `malloc` ~1.3%,
+`llhttp__internal_execute` ~2%)는 세 번의 측정 모두 일관되게 낮아 애플리케이션
+로직 자체는 건강하다고 판단. 커널 스케줄러 이슈를 제대로 보려면 전용/비가상화
+환경이 필요 -- Phase 5(CPU affinity) 작업 시 재검토.
+
+### 다음
+
+- Phase 5/7(CPU affinity, SO_REUSEPORT)은 이번 결과로 볼 때 "커넥션당 커널 비용"
+  이슈는 keep-alive로 상당 부분 해소됐으니, 스케줄러/캐시 지표를 볼 수 있는 전용
+  환경이 확보된 뒤 재측정하며 진행하는 게 맞음
+- `TCP_NODELAY` 발견 경위 자체가 "keep-alive 도입 시 흔히 같이 따라오는 함정"이라
+  일반 교훈으로 `doc/plan.md`에도 남겨둠

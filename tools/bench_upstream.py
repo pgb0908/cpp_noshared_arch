@@ -10,6 +10,7 @@ http.server.HTTPServer는 요청을 한 번에 하나씩만 처리해서(단일 
 Usage:
     python3 tools/bench_upstream.py [port]
 """
+import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -23,6 +24,16 @@ class Handler(BaseHTTPRequestHandler):
     # 없다. keep-alive 없이 매번 새 연결을 강제하고 싶으면 HTTP/1.0으로
     # 바꿔서 실행.
     protocol_version = "HTTP/1.1"
+
+    def setup(self):
+        super().setup()
+        # send_header()를 여러 번 호출해서 헤더/바디가 서로 다른 작은
+        # write로 나가는데, keep-alive라 연결이 안 끊기니 Nagle이 그
+        # 사이를 실제로 지연시킨다(끊기는 연결이었을 땐 close()가 강제로
+        # flush해줘서 안 보였음) -- 게이트웨이 쪽 TCP_NODELAY만 켰다가
+        # p50이 계속 ~41ms에 뭉치는 걸 보고 원인이 이쪽(테스트 업스트림
+        # 자체)이라는 걸 확인, doc/benchmark-report.md 참고.
+        self.connection.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
     def do_GET(self):
         self.send_response(200)

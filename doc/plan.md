@@ -323,6 +323,8 @@ GTest 63개 전부 통과 + 실제 upstream GET/POST e2e 재확인.
 - 파이프라이닝은 여전히 미지원 (요청 처리 도중 도착한 다음 요청의 leftover 바이트는 버려짐) -- 순차 keep-alive만 지원
 - HEAD 요청에 대한 응답 파싱 특수 처리 없음 (llhttp에 `llhttp_finish`/skip-body 힌트를 안 줌) -- keep-alive와 무관하게 이미 있던 pre-existing 갭, 이번에 코드 읽다가 확인됨
 
+**재측정하며 발견한 별도 버그 — `TCP_NODELAY` 누락** (`doc/benchmark-report.md` §10): keep-alive 도입 직후 wrk로 재측정하니 p50/p75/p90이 ~41ms에 고정적으로 뭉치는 회귀가 나왔음 -- Nagle + delayed ACK의 전형적 시그니처(Linux 기본 delayed ACK가 40ms). 이전엔 매 요청 후 `close()`가 Nagle이 미뤄둔 마지막 write를 강제 flush해줘서 숨어 있었을 뿐, keep-alive로 연결이 계속 열리자 드러남. `src/net/boost/socket.cpp`(accept된 downstream + connect된 upstream 둘 다)와 `tools/bench_upstream.py`(Python `http.server`도 기본으로 안 켜져 있었음) 양쪽에 `TCP_NODELAY` 추가로 해결 — 처리량 14,783(§6 다른 환경 기준) → 25,704 req/s, p90 810ms → 8.65ms. **일반 교훈**: keep-alive를 새로 켜는 프로젝트에서 흔히 같이 따라오는 함정이라 다음에 비슷한 걸 만들 때 처음부터 체크리스트에 넣을 것.
+
 ---
 
 ## 다음 세션 시작 시 체크할 것
