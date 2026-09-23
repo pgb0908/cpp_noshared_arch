@@ -1,7 +1,10 @@
 #include "upstream/upstream_manager.hpp"
 
 #include <cassert>
+#include <chrono>
 #include <iostream>
+
+#include "net/race_with_timeout.hpp"
 
 UpstreamManager::UpstreamManager(net::IEventLoop& event_loop, const Config& config)
     : event_loop_(event_loop), config_(config) {
@@ -79,44 +82,41 @@ void UpstreamManager::acquire_fresh_connection(std::size_t index, net::SocketCal
 }
 
 void UpstreamManager::connect_fresh(std::size_t index, net::SocketCallback callback) {
-    auto socket = event_loop_.create_socket();
-    net::ISocket* raw = socket.get();
+    // shared_socket만 여기 남는 이유: start_op(연결 시도)와 cancel_op(타임아웃
+    // 시 취소) 둘 다 같은 소켓에 접근해야 해서 이 두 콜백 사이의 공유는
+    // 피할 수 없다. 반면 타이머/done 플래그의 shared_ptr 관리는
+    // race_with_timeout() 안으로 완전히 숨었다 -- connect-vs-timeout
+    // 경쟁이라는 개념 자체가 net/race_with_timeout.hpp의 재사용 가능한
+    // 모듈로 뽑혀나갔기 때문 (예전엔 이 함수 안에 shared_ptr 4개로
+    // 풀어헤쳐 있었음, 자세한 경위는 doc/plan.md 참고).
+    auto shared_socket = std::make_shared<std::unique_ptr<net::ISocket>>(event_loop_.create_socket());
     const net::Endpoint target = endpoints_[index].resolved;
 
-    // connect 타임아웃: timer와 async_connect가 서로 경쟁하고, 먼저
-    // 끝나는 쪽이 상대방의 리소스(소켓/timer)를 정리해줘야 한다. 즉
-    // socket/timer/callback 모두 "두 콜백 양쪽에서 접근 가능해야 하는"
-    // 진짜 공유 상태다 -- Listener::do_accept()처럼 단순히 한 곳으로만
-    // 넘기면 끝나는 상황(그쪽은 MoveOnlyFunction으로 boxing 없이
-    // 해결됨)과 달리, 여기선 shared_ptr가 원래 의도된 정확한 도구다.
-    auto shared_socket = std::make_shared<std::unique_ptr<net::ISocket>>(std::move(socket));
-    auto timer = event_loop_.create_timer();
-    auto shared_timer = std::make_shared<std::unique_ptr<net::ITimer>>(std::move(timer));
-    auto shared_callback = std::make_shared<net::SocketCallback>(std::move(callback));
-    auto done = std::make_shared<bool>(false);
+    // race_with_timeout() 호출부에 람다 3개를 그대로 인라인하면 인자
+    // 목록 안에서 서로 다른 콜백의 들여쓰기가 겹쳐 보여 어디가 어디
+    // 콜백인지 추적하기 어렵다 -- 이름 있는 변수로 먼저 뽑아서 "연결을
+    // 시작하는 법 / 취소하는 법 / 결과를 전달하는 법"을 위에서 아래로
+    // 순서대로 읽히게 한다.
+    auto start_connecting = [shared_socket, target](net::ErrorCallback on_connect_done) {
+        (*shared_socket)->async_connect(target, std::move(on_connect_done));
+    };
 
-    (*shared_timer)->expires_after(std::chrono::seconds(config_.connect_timeout_seconds));
-    (*shared_timer)->async_wait([shared_socket, shared_callback, done](const net::Error& err) {
-        if (*done || !err.ok()) {
-            return;  // 이미 처리됐거나(connect가 먼저 끝남), timer가 cancel된 것
-        }
-        *done = true;
-        (*shared_socket)->cancel();
-        (*shared_callback)(net::Error{1, "upstream connect timed out"}, nullptr);
-    });
+    auto cancel_connecting = [shared_socket] { (*shared_socket)->cancel(); };
 
-    raw->async_connect(target, [shared_socket, shared_timer, shared_callback, done](const net::Error& err) {
-        if (*done) {
-            return;  // 타임아웃이 먼저 발생해서 이미 처리됨
-        }
-        *done = true;
-        (*shared_timer)->cancel();
+    auto deliver_result = [shared_socket, callback = std::move(callback)](const net::Error& err) mutable {
+        // err는 race_with_timeout()이 넘겨준 그대로 -- 타임아웃이
+        // 이겼으면 그쪽 메시지("operation timed out"), 아니면
+        // async_connect가 실제로 실패한 메시지. 여기서 다시 감싸지
+        // 않고 그대로 전달한다.
         if (!err.ok()) {
-            (*shared_callback)(err, nullptr);
+            callback(err, nullptr);
             return;
         }
-        (*shared_callback)(net::Error::none(), std::move(*shared_socket));
-    });
+        callback(net::Error::none(), std::move(*shared_socket));
+    };
+
+    net::race_with_timeout(event_loop_, std::chrono::seconds(config_.connect_timeout_seconds),
+                            std::move(start_connecting), std::move(cancel_connecting), std::move(deliver_result));
 }
 
 void UpstreamManager::release_connection(std::size_t index, std::unique_ptr<net::ISocket> socket) {

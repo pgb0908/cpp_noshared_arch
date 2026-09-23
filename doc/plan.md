@@ -116,6 +116,8 @@ Boost.Asio에서 `acceptor.async_accept(handler)`로 받은 소켓은 **acceptor
 
 TimerManager를 별도 클래스로 만들지, 이렇게 각 기능(UpstreamManager, MetricsAggregator)이 필요할 때 `net::ITimer`를 직접 쓰는 방식으로 갈지는 후자로 결정 — 지금 시점엔 "모든 timer를 한곳에 모으는 것"보다 "각 도메인이 자기 timer를 직접 소유하는 것"이 더 단순하고 `net::IEventLoop`이 이미 timer factory 역할을 하고 있어서 중복 추상화가 될 뻔함. Connection Idle Timeout / Request Timeout은 각각 HTTP 레이어와 idle-connection 정리가 실제로 필요해지는 시점에 붙이기로 미룸.
 
+**후속 개선 (`/improve-codebase-architecture` 세션, ✅ 완료)**: 이 connect-vs-timeout 경쟁 로직(소켓/타이머/콜백/`done` 플래그를 `shared_ptr<unique_ptr<T>>` 4개로 묶어 관리하던 부분)이 `connect_fresh()` 안에 이름 없이 풀어헤쳐 있어서 "재사용 불가능한 얕은 코드"로 지적됨 — `MoveOnlyFunction` 도입 취지(boxing 제거)와도 겉보기엔 모순돼 보였지만, 실제로는 두 콜백이 같은 상태를 공유해야 하는 진짜 경쟁 상황이라 `shared_ptr` 자체는 정당한 선택이었음. `net::race_with_timeout()`(`src/net/race_with_timeout.{hpp,cpp}`)으로 "취소 가능한 비동기 작업 vs 타임아웃" 패턴 자체를 추출 — 타이머/`done` 플래그 관리는 이 안으로 완전히 숨고, `connect_fresh()`엔 소켓 공유용 `shared_ptr` 1개만 남음(4개→1개). 나중에 읽기 타임아웃/DNS 타임아웃 등 같은 패턴이 또 필요해지면 재사용 가능. `tests/race_with_timeout_test.cpp`로 이 경쟁 로직 자체를 `UpstreamManager` 없이 독립적으로 테스트 가능해짐 (기존 `upstream_manager_test.cpp`의 타이밍 경쟁 테스트 4개는 회귀 없이 그대로 통과). 실측: 블랙홀 IP로 connect timeout이 설정값(2초)에 정확히 맞춰 발생하고 `connect_errors` 카운터도 정상 증가함을 재확인.
+
 ### 2. 실제 BufferPool (free-list)
 `src/util/buffer_pool.hpp`가 shard-local free-list를 갖도록 변경. `acquire()`는 free-list에 있으면 재사용, 없으면 새로 `new`. `release()`는 그냥 버리지 않고 free-list에 반납 (상한 `Config::buffer_pool_max_free`, 기본 256 — 초과분은 버림). `Session::close()`가 두 relay 버퍼를 명시적으로 `buffer_pool_.release()`하도록 수정 (이전엔 Session 소멸과 함께 그냥 버려졌음).
 

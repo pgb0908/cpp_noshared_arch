@@ -55,6 +55,7 @@ add_executable(perCoreShard
     src/session/http_session.cpp
     src/upstream/upstream_manager.cpp
     src/util/cpu_topology.cpp
+    src/net/race_with_timeout.cpp
     src/net/boost/acceptor.cpp
     src/net/boost/event_loop.cpp
     src/net/boost/factory.cpp
@@ -80,6 +81,7 @@ if(GTest_FOUND)
     add_executable(perCoreShard_tests
         src/upstream/upstream_manager.cpp
         src/util/cpu_topology.cpp
+        src/net/race_with_timeout.cpp
         ${PERCORESHARD_HTTP_SOURCES}
         ${PERCORESHARD_FILTER_SOURCES}
         tests/buffer_pool_test.cpp
@@ -94,6 +96,7 @@ if(GTest_FOUND)
         tests/filter_chain_test.cpp
         tests/body_filter_gate_test.cpp
         tests/cpu_topology_test.cpp
+        tests/race_with_timeout_test.cpp
     )
     target_include_directories(perCoreShard_tests PRIVATE src tests)
     target_link_libraries(perCoreShard_tests PRIVATE
