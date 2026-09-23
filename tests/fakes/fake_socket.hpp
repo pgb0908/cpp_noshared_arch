@@ -56,6 +56,8 @@ public:
 
     int release_native_handle() override { return -1; }  // fake라 실제 fd 없음
 
+    bool is_owned_by_current_thread() const override { return event_loop_.is_current_thread(); }
+
     // --- 테스트 제어용 ---
     // 아래 네 메서드 모두, 해당 방향에 pending 콜백이 없으면(이미
     // 소비됐거나 애초에 걸린 적 없으면) 조용히 아무 일도 안 한다 --

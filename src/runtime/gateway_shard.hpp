@@ -27,17 +27,21 @@ public:
     // 건 안전함.
     void stop();
 
-    // 새로 accept된 소켓의 진입점. 반드시 Listener 스레드에서
-    // event_loop().post(...)를 통해서만 호출돼야 하고, 그 소켓은 이미 이
-    // shard의 event loop에 adopt_socket()으로 재바인딩된 상태여야 한다
-    // -- 다른 loop에 바인딩된 소켓을 스레드 경계 넘어 직접 호출하면 안 됨.
-    void dispatch_accept(std::unique_ptr<net::ISocket> socket);
+    // Listener가 accept한 소켓을 이 shard로 안전하게 넘기는 유일한
+    // 진입점. 호출 스레드는 무관 -- 내부적으로 이 shard의 event loop에
+    // post한 뒤 adopt_socket()으로 재바인딩하고 나서야 세션을 시작한다.
+    // 호출부(Listener)는 post/adopt_socket이라는 개념을 몰라도 된다.
+    void accept_from(std::unique_ptr<net::ISocket> foreign_socket);
 
-    net::IEventLoop& event_loop() { return *event_loop_; }
     const LocalMetrics& metrics() const { return metrics_; }
     std::size_t index() const { return index_; }
 
 private:
+    // accept_from()이 재바인딩까지 끝낸 뒤에만 호출한다. net::AdoptedSocket
+    // 타입 자체가 "adopt_socket()을 거치지 않은 소켓은 여기 못 들어온다"는
+    // 걸 컴파일 타임에 보장한다 -- net/event_loop.hpp 참고.
+    void dispatch_accept(net::AdoptedSocket socket);
+
     std::size_t index_;
     const Config& config_;
 

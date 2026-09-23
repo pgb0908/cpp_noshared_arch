@@ -30,15 +30,21 @@ void GatewayShard::stop() {
     }
 }
 
-void GatewayShard::dispatch_accept(std::unique_ptr<net::ISocket> socket) {
-    // 이 소켓은 여기 도달하기 전에 반드시 이 shard의 event
-    // loop에 (Listener가 adopt_socket()으로) 재바인딩돼 있어야 한다.
-    // 그렇지 않으면 이 connection의 모든 HttpSession 콜백이 이 shard가
-    // 아니라 조용히 Listener 스레드에서 실행되어 버린다 -- 전체 경위는
-    // net/event_loop.hpp의 adopt_socket() 주석 참고.
+void GatewayShard::accept_from(std::unique_ptr<net::ISocket> foreign_socket) {
+    event_loop_->post([this, socket = std::move(foreign_socket)]() mutable {
+        // 이 시점에 socket은 아직 Listener의 event loop에 바인딩돼
+        // 있다. adopt_socket()이 이걸 이 shard 자신의 loop로 재바인딩해서,
+        // 이후 이 connection의 모든 I/O가 실제로 이 shard의 스레드에서
+        // 실행되게 만든다 -- net/event_loop.hpp 참고.
+        dispatch_accept(event_loop_->adopt_socket(std::move(socket)));
+    });
+}
+
+void GatewayShard::dispatch_accept(net::AdoptedSocket socket) {
     assert(event_loop_->is_current_thread() && "dispatch_accept() called from a non-owning thread");
 
-    auto session = std::make_shared<HttpSession>(std::move(socket), *event_loop_, upstream_manager_, buffer_pool_,
-                                                  filter_chain_, config_.body_buffer_high_watermark_bytes, metrics_);
+    auto session =
+        std::make_shared<HttpSession>(socket.release(), *event_loop_, upstream_manager_, buffer_pool_, filter_chain_,
+                                       config_.body_buffer_high_watermark_bytes, metrics_);
     session->start();
 }

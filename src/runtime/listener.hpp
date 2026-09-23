@@ -39,17 +39,10 @@ private:
                 GatewayShard& target_shard = *shards_[next_shard_];
                 next_shard_ = (next_shard_ + 1) % shards_.size();
 
-                net::IEventLoop& target_loop = target_shard.event_loop();
-                target_loop.post([&target_shard, &target_loop, socket = std::move(socket)]() mutable {
-                    // 이 시점에 accept된 소켓은 아직 이 Listener의 event
-                    // loop에 바인딩돼 있다. adopt_socket()이 이걸 shard
-                    // 자신의 loop로 재바인딩해서, 이 connection의 이후
-                    // 모든 I/O가 실제로 shard의 스레드에서 실행되게
-                    // 만든다 -- listener 스레드가 아니라. net/event_loop.hpp
-                    // 참고.
-                    auto rebound = target_loop.adopt_socket(std::move(socket));
-                    target_shard.dispatch_accept(std::move(rebound));
-                });
+                // 스레딩(post)이나 event loop 재바인딩(adopt_socket)은
+                // 전부 GatewayShard::accept_from()의 책임 -- Listener는
+                // "이 소켓을 이 shard에 넘긴다"는 것만 알면 된다.
+                target_shard.accept_from(std::move(socket));
             } else {
                 std::cerr << "accept error: " << err.message << "\n";
             }

@@ -26,10 +26,12 @@ bool BoostEventLoop::is_current_thread() const noexcept {
     return has_run_.load(std::memory_order_acquire) && std::this_thread::get_id() == owner_thread_id_;
 }
 
-std::unique_ptr<net::ISocket> BoostEventLoop::create_socket() { return std::make_unique<BoostSocket>(io_context_); }
+std::unique_ptr<net::ISocket> BoostEventLoop::create_socket() {
+    return std::make_unique<BoostSocket>(*this, io_context_);
+}
 
 std::unique_ptr<net::IAcceptor> BoostEventLoop::create_acceptor(uint16_t port) {
-    return std::make_unique<BoostAcceptor>(io_context_, port);
+    return std::make_unique<BoostAcceptor>(*this, io_context_, port);
 }
 
 std::unique_ptr<net::IResolver> BoostEventLoop::create_resolver() {
@@ -38,9 +40,9 @@ std::unique_ptr<net::IResolver> BoostEventLoop::create_resolver() {
 
 std::unique_ptr<net::ITimer> BoostEventLoop::create_timer() { return std::make_unique<BoostTimer>(io_context_); }
 
-std::unique_ptr<net::ISocket> BoostEventLoop::adopt_socket(std::unique_ptr<net::ISocket> foreign_socket) {
+std::unique_ptr<net::ISocket> BoostEventLoop::do_adopt_socket(std::unique_ptr<net::ISocket> foreign_socket) {
     const int fd = foreign_socket->release_native_handle();
-    return std::make_unique<BoostSocket>(io_context_, fd);
+    return std::make_unique<BoostSocket>(*this, io_context_, fd);
 }
 
 }  // namespace net::boost_asio

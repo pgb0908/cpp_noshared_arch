@@ -49,10 +49,6 @@ public:
         return t;
     }
 
-    std::unique_ptr<net::ISocket> adopt_socket(std::unique_ptr<net::ISocket> foreign_socket) override {
-        return foreign_socket;  // 단일 loop 테스트라 재바인딩 불필요
-    }
-
     // 큐에 쌓인 작업을 전부(그 작업이 새로 post한 것까지 재귀적으로)
     // 실행한다. FakeSocket/FakeTimer의 콜백은 모두 post()를 거치므로,
     // 어떤 async 조작을 한 뒤 이걸 호출해야 콜백이 실제로 실행된다.
@@ -70,6 +66,10 @@ public:
     FakeResolver* last_resolver() const { return last_resolver_; }
 
 private:
+    std::unique_ptr<net::ISocket> do_adopt_socket(std::unique_ptr<net::ISocket> foreign_socket) override {
+        return foreign_socket;  // 단일 loop 테스트라 재바인딩 불필요
+    }
+
     std::deque<net::VoidCallback> queue_;
     std::vector<FakeSocket*> created_sockets_;
     std::vector<FakeTimer*> created_timers_;

@@ -11,6 +11,22 @@
 
 namespace net {
 
+// IEventLoop::adopt_socket()을 거친 소켓이라는 걸 타입으로 증명하는
+// 래퍼. 생성자가 private + IEventLoop만 friend라서, adopt_socket() 밖의
+// 코드는 이 타입의 인스턴스를 만들 방법이 없다 -- "재바인딩 안 된
+// 소켓을 shard에 넘긴다"는 실수를 컴파일 타임에 원천 차단하기 위함
+// (doc/plan.md의 "accept된 소켓의 event loop 재바인딩" 절 참고).
+class AdoptedSocket {
+public:
+    std::unique_ptr<ISocket> release() { return std::move(socket_); }
+
+private:
+    friend class IEventLoop;
+    explicit AdoptedSocket(std::unique_ptr<ISocket> socket) : socket_(std::move(socket)) {}
+
+    std::unique_ptr<ISocket> socket_;
+};
+
 // event loop 하나 = 실행 컨텍스트 하나(예: boost::asio::io_context 하나)이며
 // 정확히 스레드 하나에서 돈다. per-core-shard 아키텍처의
 // "shard당 io_context 1개" 규칙을 그대로 따름 -- 각 GatewayShard는
@@ -48,10 +64,28 @@ public:
     // Session의 실제 read/write 완료 콜백이 계속 Listener 스레드에서
     // 실행되어 -- 소유 shard의 스레드가 아니라 -- per-core-shard
     // 설계 전체를 조용히 무력화시킨다. 해결책: accept된 소켓의 native
-    // handle을 release한 뒤 대상 loop에 바인딩된 상태로 재구성 --
-    // 이걸 여기서 처리해서 도메인 계층(Listener)은 이 메커니즘을 전혀
-    // 몰라도 되게 한다. 전체 경위는 doc/plan.md 참고.
-    virtual std::unique_ptr<ISocket> adopt_socket(std::unique_ptr<ISocket> foreign_socket) = 0;
+    // handle을 release한 뒤 대상 loop에 바인딩된 상태로 재구성.
+    //
+    // non-virtual: 반환값을 항상 AdoptedSocket으로 감싸는 걸 여기서
+    // 강제한다 (Template Method 패턴) -- 구현체(BoostEventLoop 등)는
+    // do_adopt_socket()만 오버라이드하면 되고, 그 결과가 AdoptedSocket
+    // 없이 그냥 unique_ptr<ISocket>으로 새어나갈 방법이 없다. 도메인
+    // 계층(Listener)은 이 메커니즘을 전혀 몰라도 되게 한다. 전체 경위는
+    // doc/plan.md 참고.
+    AdoptedSocket adopt_socket(std::unique_ptr<ISocket> foreign_socket) {
+        return AdoptedSocket(do_adopt_socket(std::move(foreign_socket)));
+    }
+
+private:
+    // private virtual이어도 하위 클래스(BoostEventLoop 등)는 문제없이
+    // 오버라이드할 수 있다 -- C++에서 접근 지정자는 "누가 호출할 수
+    // 있는가"만 통제하지 "누가 오버라이드할 수 있는가"는 통제하지
+    // 않는다 (Herb Sutter의 NVI/"Virtuality" 관용구). 여기선 이
+    // 메서드를 호출하는 코드가 adopt_socket() 하나뿐이라, protected로
+    // 열어줄 이유가 없다 -- private으로 좁혀서 하위 클래스가 실수로
+    // 이걸 직접 호출해 AdoptedSocket 래핑을 우회하는 경로 자체를
+    // 없앤다.
+    virtual std::unique_ptr<ISocket> do_adopt_socket(std::unique_ptr<ISocket> foreign_socket) = 0;
 };
 
 }  // namespace net

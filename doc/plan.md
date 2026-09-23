@@ -90,6 +90,21 @@ Boost.Asio에서 `acceptor.async_accept(handler)`로 받은 소켓은 **acceptor
 
 **의사결정 필요**: 이 assert들을 나중에 Release 빌드에서도 살려둘지(런타임 비용은 거의 0 — 비교 1번), 아니면 Phase 6 프로파일링 이후 안정성이 확인되면 NDEBUG로 끌지.
 
+### 4. 후속 개선: 이 불변식을 assert가 아니라 타입으로 강제 ✅
+
+`/improve-codebase-architecture` 세션에서 이 지점을 "얕은 모듈" 후보로 다시 짚음 — 계기는 `GatewayShard::dispatch_accept()`의 `assert(event_loop_->is_current_thread())`가 **사실 원래 버그를 못 잡는다**는 걸 재발견한 것: `dispatch_accept()`는 항상 `target_loop.post(lambda)` 안에서만 호출되므로 이 assert는 `adopt_socket()`을 실제로 호출했는지와 무관하게 항상 통과한다. 즉 3번 항목의 방어는 "호출 스레드"를 검증할 뿐 "소켓이 진짜로 재바인딩됐는지"는 전혀 검증하지 못하는, 사실상 장식이었음.
+
+**두 가지를 함께 구현**:
+
+1. **`net::AdoptedSocket`** (`net/event_loop.hpp`) — `adopt_socket()`을 거친 소켓이라는 걸 타입으로 증명하는 래퍼. 생성자가 private + `IEventLoop`만 friend라 `adopt_socket()` 밖에서는 인스턴스를 만들 수 없음. `IEventLoop::adopt_socket()`을 non-virtual public(NVI 패턴)으로 바꿔 항상 이 타입으로 감싸 반환하도록 강제하고, 구현체(`BoostEventLoop`)는 protected virtual `do_adopt_socket()`만 오버라이드. `GatewayShard::dispatch_accept(net::AdoptedSocket)`로 시그니처를 바꿔서, **adopt 안 된 소켓을 넘기는 코드는 컴파일이 안 됨** (런타임 검증에서 컴파일 타임 차단으로).
+2. **`ISocket::is_owned_by_current_thread()`** — 소켓 자신이 "내가 어느 event loop 소유인지"를 알게 함. `BoostSocket`이 `net::IEventLoop& owner_`를 들고(생성 시점에 항상 자신을 만든 `IEventLoop` 구현체(`*this`)를 전달받음), `async_connect/async_read_some/async_write/shutdown/close/cancel` 진입부마다 이걸로 자체 검증. `release_native_handle()`만 예외 — `adopt_socket()`의 재바인딩 절차 자체가 이걸 의도적으로 원래 소유 스레드가 아닌 대상 shard 스레드에서 호출하기 때문(fd만 뽑아내고 리액터 등록은 안 건드리는 안전한 연산이라 스레드 무관 허용).
+
+**두 방어의 역할 분담**: `AdoptedSocket`은 "이 특정 실수(accept 인계 시 재바인딩 빼먹기)는 애초에 코드가 안 돌아가게" 막는 컴파일 타임 방어(빌드 타입 무관, 항상 유효) — 위 3번의 "Release에서 assert 꺼도 되나" 고민과 무관하게 항상 살아있음. `is_owned_by_current_thread()`는 "혹시 예상 못 한 다른 방식으로 소켓을 잘못 넘기더라도, 실제로 잘못 쓰는 순간(런타임, Debug 빌드) 바로 잡아주는" 일반적 안전망 — 기존에 `HttpSession`/`GatewayShard`/`UpstreamManager`에 흩어져 복붙된 `assert_on_owning_thread()`류와 같은 계열이지만, 호출부가 아니라 소켓 자신에게 검증 책임을 둬서 어디서 쓰이든 자동으로 적용됨.
+
+**부수 효과**: `Listener::do_accept()`가 `post`/`adopt_socket` 호출을 몰라도 되게 단순화됨 (`GatewayShard::accept_from()`으로 그 시퀀스 전체를 이관) — `GatewayShard::event_loop()` public 접근자도 이 용도로만 쓰이고 있어서 제거함.
+
+**검증**: GTest 67개 전부 통과 + 실제 Python 업스트림 2개로 e2e(GET/동시 20개 요청/POST 바디 relay) 확인 — Debug 빌드라 assert 하나라도 잘못됐으면 즉시 크래시했을 텐데 정상 종료, shard별 요청도 고르게 분산됨.
+
 ---
 
 ## Phase 4 — Timer / Buffer / Metrics 완전 Local화 ✅

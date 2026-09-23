@@ -21,9 +21,12 @@ public:
     std::unique_ptr<net::IAcceptor> create_acceptor(uint16_t port) override;
     std::unique_ptr<net::IResolver> create_resolver() override;
     std::unique_ptr<net::ITimer> create_timer() override;
-    std::unique_ptr<net::ISocket> adopt_socket(std::unique_ptr<net::ISocket> foreign_socket) override;
 
 private:
+    // base(IEventLoop)에서 private virtual이지만 오버라이드는 문제없다
+    // -- net/event_loop.hpp 주석 참고.
+    std::unique_ptr<net::ISocket> do_adopt_socket(std::unique_ptr<net::ISocket> foreign_socket) override;
+
     ::boost::asio::io_context io_context_;
     ::boost::asio::executor_work_guard<::boost::asio::io_context::executor_type> work_guard_;
 
