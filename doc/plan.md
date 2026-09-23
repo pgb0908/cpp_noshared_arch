@@ -18,7 +18,7 @@
 | **Phase 6 baseline 프로파일링** | ✅ **완료** — wrk + perf + FlameGraph, kptr_restrict 해제 후 재측정까지 (`doc/benchmark-report.md`) |
 | **keep-alive (downstream + upstream)** | ✅ **완료** — hop 독립 판단, upstream pool 실사용, stale pooled connection retry-once. 아래 상세 |
 | GTest 전체 | 63개, 전부 통과 |
-| Phase 5 (CPU Affinity 고도화) | 미착수 |
+| Phase 5 (CPU Affinity 고도화) | ✅ 완료 -- hwloc으로 P-core/E-core 감지, 실측 하드웨어에서 실제 pinning 결과(PSR)까지 검증 |
 | Phase 6 (프로파일링 기반 Hot Path 최적화, baseline 이후 개선) | 미착수 |
 | Phase 7 (SO_REUSEPORT) | 미착수 |
 | 라우팅/정책/RuntimeConfigManager/TLS | 미착수 |
@@ -132,12 +132,20 @@ TimerManager를 별도 클래스로 만들지, 이렇게 각 기능(UpstreamMana
 
 ---
 
-## Phase 5 — CPU Affinity 고도화
+## Phase 5 — CPU Affinity 고도화 ✅ 완료
 
-Phase 1에서 기본 pinning(`pin_thread_to_cpu`, shard i → core i)은 이미 구현됨. 남은 작업:
-- `lscpu`/`hwloc` 기반으로 실제 NUMA topology, hyperthread(sibling) 구조를 감지해서 매핑 개선 (지금은 순진하게 0..N-1 순서로 고정)
-- `--shards`가 물리 코어 수보다 크게 설정된 경우(hyperthreading 포함 논리 코어 초과 등)에 대한 처리 정책 결정
-- 필요 시 특정 코어를 제외(OS/인터럽트 처리용으로 예약)하는 옵션 추가
+**계기**: Phase 6 벤치마크 도중 실제 개발 머신(Intel Core Ultra 7 265K)이 **P-core 8개(cpu0-7, ~4.9~5.0GHz) + E-core 12개(cpu8-19, ~4.6GHz, 4개씩 L2 공유)**로 구성된 이기종(hybrid) CPU라는 걸 발견 -- `lscpu -e`의 `MAXMHZ`/`L2` 컬럼으로 확인. NUMA는 이 머신이 단일 소켓/단일 노드라 해당 사항 없음(`lscpu`의 `NUMA node(s): 1`) -- doc이 원래 상정한 멀티소켓 서버 시나리오와 달라서, 이번 Phase의 실질적인 과제는 "NUMA"가 아니라 "이기종 코어 성능 비대칭"이었음.
+
+**설계 확정 사항**:
+- P-core/E-core 감지는 `hwloc`의 `cpukinds` API로 (Intel 하이브리드뿐 아니라 ARM big.LITTLE 등도 포괄하는 표준 API). `efficiency` 값이 높을수록 고성능 코어(P-core) -- `hwloc/cpukinds.h` 문서에 명시된 대로 kind_index가 클수록 고성능이라 인덱스를 내림차순으로 순회하면 됨
+- shard 수가 P-core 개수를 넘으면 **E-core로 자연스럽게 이어서 배정하고 경고 로그만 출력** (서비스 중단 안 함) -- 상한을 걸어 거부하는 대안도 검토했으나, 가용성을 우선하기로 함
+- 특정 코어를 OS/인터럽트 처리용으로 예약하는 기능은 지금 안 만듦 -- 실측으로 필요성이 확인되면 그때 추가 (YAGNI)
+
+**구조**: `src/util/cpu_topology.{hpp,cpp}` -- `build_shard_cpu_plan()`이 `ShardCpuPlan{cpus, top_tier_count}`를 반환. `cpus`는 성능 높은 코어부터 정렬된 논리 CPU 번호, `top_tier_count`는 그중 최고 성능 그룹(P-core)의 개수. hwloc이 이기종 정보를 못 찾으면(동종 CPU) 그냥 0..N-1을 돌려줘서 Phase 1의 기존 동작과 동일하게 폴백. `GatewayRuntime::start()`가 이 plan대로 `shard i → plan.cpus[i]`로 pinning하고, `i >= top_tier_count`면 `[cpu_affinity] warning: ...` 로그를 찍음.
+
+**빌드**: hwloc(BSD 라이선스)이 새 외부 의존성으로 추가됨. CMake config 패키지가 없어서 `pkg-config`로 찾음(`PkgConfig::HWLOC` imported target). Ubuntu는 `libhwloc-dev`만 있으면 됨(CLI 도구 `lstopo`는 별도 패키지 `hwloc-nox`라 빌드엔 불필요).
+
+**검증**: `shard_count=12`(P-core 8개 초과)로 실행해 (1) shard 8~11에서 정확히 경고 로그가 찍히는 것 (2) `ps -L -o tid,psr`로 실제 커널이 보고하는 실행 코어(PSR)가 shard 0~11 → cpu 0~11로 정확히 일치하는 것까지 실측 확인. GTest `tests/cpu_topology_test.cpp` 4개 추가(하드웨어 의존적이라 "P-core가 정확히 몇 개"같은 값 자체가 아니라 "결과가 비어있지 않음/중복 없음/0 이상/top_tier_count가 범위 내" 같은 불변조건만 검증).
 
 ---
 

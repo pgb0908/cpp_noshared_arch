@@ -11,6 +11,7 @@
 #include <iostream>
 
 #include "net/boost/factory.hpp"
+#include "util/cpu_topology.hpp"
 
 GatewayRuntime::GatewayRuntime(Config config) : config_(std::move(config)) {}
 
@@ -19,8 +20,25 @@ void GatewayRuntime::start() {
     for (std::size_t i = 0; i < config_.shard_count; ++i) {
         shards_.push_back(std::make_unique<GatewayShard>(i, config_));
     }
+
+    // P-core/E-core처럼 성능이 다른 코어가 섞인 CPU에서 shard를 "성능 높은
+    // 코어부터" 채운다 (Phase 5, doc/plan.md 참고). 동종 CPU에서는
+    // build_shard_cpu_plan()이 그냥 0..N-1을 돌려줘서 이전과 동일하게 동작.
+    const ShardCpuPlan cpu_plan = build_shard_cpu_plan();
     for (std::size_t i = 0; i < shards_.size(); ++i) {
-        shards_[i]->start(static_cast<int>(i));
+        if (i < cpu_plan.cpus.size()) {
+            if (i >= cpu_plan.top_tier_count) {
+                std::cerr << "[cpu_affinity] warning: shard " << i << " pinned to cpu" << cpu_plan.cpus[i]
+                          << ", a lower-tier core (P-core budget of " << cpu_plan.top_tier_count
+                          << " exceeded) -- expect lower per-shard throughput\n";
+            }
+            shards_[i]->start(cpu_plan.cpus[i]);
+        } else {
+            // 감지된 논리 CPU 수보다 shard가 많음 -- 예전처럼 그냥 인덱스를
+            // 그대로 넘긴다 (pin_thread_to_cpu()가 실패하면 자체적으로
+            // 에러를 로깅하고 unpinned로 계속 진행함).
+            shards_[i]->start(static_cast<int>(i));
+        }
     }
 
     listener_event_loop_ = net::boost_asio::create_event_loop();
